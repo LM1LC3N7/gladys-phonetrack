@@ -117,15 +117,49 @@ export const T = {
       en: 'The certificate fingerprint must be a SHA-256 fingerprint: 64 hexadecimal digits, colons allowed.',
       fr: 'L’empreinte du certificat doit être une empreinte SHA-256 : 64 chiffres hexadécimaux, deux-points permis.',
     },
+    tokenUnsupported: {
+      en: 'This link is a public watch page or a filtered share: filtered share not supported. Paste the "API URL (JSON, last positions)" of the public session (or its token). Nothing was sent.',
+      fr: 'Ce lien est une page de visualisation publique ou un partage filtré : partage filtré non pris en charge. Collez l’« API URL (JSON, last positions) » de la session publique (ou son jeton). Rien n’a été envoyé.',
+    },
+    configUnreadable: {
+      en: 'Gladys did not give the configuration of the integration: read again in 1 min.',
+      fr: 'Gladys n’a pas transmis la configuration de l’intégration : nouvelle lecture dans 1 min.',
+    },
     refused: (status, delay) =>
       join({
-        en: `Nextcloud refused the token (HTTP ${status}: session no longer public, share deleted, wrong token, or an authentication in front of Nextcloud). Each refusal counts as an attack for Nextcloud: Gladys stops for ${delayText(delay).en} (1 h, then 6 h, then 24 h). Saving the configuration tries once at once.`,
-        fr: `Nextcloud a refusé le jeton (HTTP ${status} : session plus publique, partage supprimé, jeton faux, ou authentification devant Nextcloud). Chaque refus compte comme une attaque pour Nextcloud : Gladys s’arrête ${delayText(delay).fr} (1 h, puis 6 h, puis 24 h). Enregistrer la configuration fait un essai tout de suite.`,
+        en: `Nextcloud refused the token (HTTP ${status}: session no longer public, share deleted, wrong token, an authentication in front of Nextcloud, or a firewall / proxy blocks Gladys). Each refusal counts as an attack for Nextcloud: Gladys stops for ${delayText(delay).en} (1 h, then 6 h, then 24 h). Saving the configuration tries once per series of refusals (another token or address: at once).`,
+        fr: `Nextcloud a refusé le jeton (HTTP ${status} : session plus publique, partage supprimé, jeton faux, authentification devant Nextcloud, ou un pare-feu / proxy bloque Gladys). Chaque refus compte comme une attaque pour Nextcloud : Gladys s’arrête ${delayText(delay).fr} (1 h, puis 6 h, puis 24 h). Enregistrer la configuration fait un essai par série de refus (un autre jeton ou une autre adresse : tout de suite).`,
       }),
-    stillRefused: (delay) => ({
-      en: `Nextcloud refused this token earlier: Gladys waits ${delayText(delay).en} before trying again (saving the configuration tries once at once).`,
-      fr: `Nextcloud a refusé ce jeton plus tôt : Gladys attend ${delayText(delay).fr} avant de réessayer (enregistrer la configuration fait un essai tout de suite).`,
+    stillRefused: (delay, forced = false) =>
+      forced
+        ? {
+            en: `Nextcloud refused this token earlier, and it was already tried again: next attempt in ${delayText(delay).en} (another token or address is tried at once).`,
+            fr: `Nextcloud a refusé ce jeton plus tôt, et il a déjà été réessayé : prochain essai dans ${delayText(delay).fr} (un autre jeton ou une autre adresse est essayé tout de suite).`,
+          }
+        : {
+            en: `Nextcloud refused this token earlier: Gladys waits ${delayText(delay).en} before trying again (saving the configuration tries once at once).`,
+            fr: `Nextcloud a refusé ce jeton plus tôt : Gladys attend ${delayText(delay).fr} avant de réessayer (enregistrer la configuration fait un essai tout de suite).`,
+          },
+    alreadyRetried: (delay) => ({
+      en: `Already tried again after this refusal: next attempt in ${delayText(delay).en}. Saving the same token again does not shorten the stop (another token or address is tried at once).`,
+      fr: `Déjà réessayé après ce refus : prochain essai dans ${delayText(delay).fr}. Enregistrer de nouveau le même jeton ne raccourcit pas l’arrêt (un autre jeton ou une autre adresse est essayé tout de suite).`,
     }),
+    internal: (delay) =>
+      join(
+        {
+          en: 'Internal error of the integration while reading the answer of PhoneTrack (see the logs of the integration).',
+          fr: 'Erreur interne de l’intégration en lisant la réponse de PhoneTrack (voir les journaux de l’intégration).',
+        },
+        RETRY(delay),
+      ),
+    tooLarge: (delay) =>
+      join(
+        {
+          en: 'Nextcloud answers, but the answer is too large (above 2 MB): too many devices in the session?',
+          fr: 'Nextcloud répond, mais la réponse est trop grande (plus de 2 Mo) : trop d’appareils dans la session ?',
+        },
+        RETRY(delay),
+      ),
     tlsUntrusted: (delay) =>
       join(
         {

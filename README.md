@@ -31,20 +31,25 @@ Gladys ⇄ SDK ⇄ src/app.js (PhonetrackApp)
 - **Refusals** (HTTP 401 / 403, or PhoneTrack's own 404 `{"error": "Session
 not found"}`): Nextcloud counts each one as a brute-force attempt, so the
   integration stops 1 h, then 6 h, then 24 h (persisted in `/data` as a
-  salted HMAC of the address and token, with the step and the end); saving
-  the configuration makes one attempt at once. HTTP 429 and 5xx pause every
+  salted HMAC of the address and token, with the step and the end, written
+  as soon as the answer arrives, whatever the app became meanwhile; an
+  attempt in flight at a stop counts as a refusal); saving the same token
+  makes one attempt per series of refusals. HTTP 429 and 5xx pause every
   request (Retry-After, 1 min to 6 h, never under the poll interval, kept in
-  `/data`); other failures retry from the poll interval, doubling to 30 min.
+  `/data`); other failures retry from the poll interval, doubling to 30 min,
+  but never before the end of the current step within a series of refusals.
 - **TLS**: strict by default; a self-signed certificate is accepted only by
   a typed SHA-256 fingerprint, checked on the handshake before the request
   (and the token) is written. `http://` is refused.
-- **Reading** (every 60 s by default): one request; 50 devices at most.
+- **Reading** (every 60 s by default): one request; 50 devices at most
+  (created ones first); one unreadable device is skipped alone.
   External ids: `device:<digest of the token>-<digest of the device name>`
   (never the token). Every state within 250 states/min: silent, then the
   position (latitude with longitude), battery, other numbers, last seen.
 - **Trigger** `device_silent`: per device and threshold (15 min to 24 h,
-  required in the scene), once per silence; nothing for what is already
-  silent at the first reading or for a new device.
+  required in the scene), devices created in Gladys only, once per silence;
+  never for a delay already reached at start, for a new device, or at a
+  reading after a clock jump; 30 events per reading, the rest at the next.
 - **Privacy**: no position, name, token or address in the logs or `/data`.
 - **User position on the Gladys map**: not possible for an external
   integration today (no host API endpoint): see TODO.md for the core change

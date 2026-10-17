@@ -14,9 +14,10 @@ export const DEFAULTS = Object.freeze({
 /** What PhoneTrack gives as a public token: letters, digits, `-` and `_`. */
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{6,128}$/;
 
-/** The links of PhoneTrack that carry the public token of a session. */
-const LINK_PATTERN =
-  /\/apps\/phonetrack\/(?:api\/getlastpositions|api\/getpositions|publicSessionWatch)\/([^/?#]+)/i;
+/** The API links of PhoneTrack that carry the public token of a session. */
+const LINK_PATTERN = /\/apps\/phonetrack\/(?:api\/getlastpositions|api\/getpositions)\/([^/?#]+)/i;
+/** Watch pages (public session or filtered share): not supported, never sent. */
+const WATCH_PATTERN = /\/apps\/phonetrack\/(?:publicSessionWatch|publicWatch)\/[^/?#]+/i;
 
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
 
@@ -40,7 +41,9 @@ export function parseServerUrl(value) {
     return { error: 'invalid' };
   }
   // A link with the token typed in this field (shown in clear): refused.
-  if (LINK_PATTERN.test(url.pathname)) return { error: 'link' };
+  if (LINK_PATTERN.test(url.pathname) || WATCH_PATTERN.test(url.pathname)) {
+    return { error: 'link' };
+  }
   if (url.protocol === 'http:') return { error: 'http' };
   if (url.protocol !== 'https:') return { error: 'invalid' };
   if (url.username || url.password) return { error: 'credentials' };
@@ -61,10 +64,13 @@ export function parseServerUrl(value) {
 }
 
 /**
- * The token field: the public token of the session, or a link of PhoneTrack
- * that carries it (the "API link" of the session's public sharing, or its
- * public watch link). -> { token, linkServer } | { error: 'invalid' }; with a
+ * The token field: the public token of the session, or an API link of
+ * PhoneTrack that carries it (`api/getlastpositions/<token>`, the "API URL"
+ * of the session's public sharing, or `api/getpositions/<token>`).
+ * -> { token, linkServer } | { error: 'invalid' | 'unsupported' }; with a
  * link, `linkServer` is the Nextcloud address it points to (parseServerUrl).
+ * A watch page (public session or filtered share) is 'unsupported': a
+ * filtered share token is refused by `getlastpositions` (never sent).
  */
 export function parseToken(value) {
   const raw = text(value);
@@ -77,6 +83,7 @@ export function parseToken(value) {
   } catch {
     return { error: 'invalid' };
   }
+  if (WATCH_PATTERN.test(url.pathname)) return { error: 'unsupported' };
   const match = LINK_PATTERN.exec(url.pathname);
   if (!match) return { error: 'invalid' };
   let token;
@@ -113,6 +120,7 @@ export function normalizeConfig(raw = {}) {
     server: urlError ? null : server,
     urlError,
     token,
+    tokenUnsupported: parsedToken.error === 'unsupported',
     tokenInvalid: Boolean(parsedToken.error) || (token !== '' && !TOKEN_PATTERN.test(token)),
     fingerprint,
     fingerprintInvalid: typedFingerprint !== '' && fingerprint === null,

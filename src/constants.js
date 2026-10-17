@@ -59,7 +59,7 @@ export const TIMEOUTS = Object.freeze({
    * One request. Nextcloud's brute-force protection slows the answers of an
    * address it suspects (up to 25 s) before it refuses them (HTTP 429).
    */
-  API: 30_000,
+  API: 45_000,
 });
 
 export const INTERVALS = Object.freeze({

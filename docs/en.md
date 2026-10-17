@@ -55,7 +55,9 @@ log and sends it only to your Nextcloud. Turning **Public session** off in
 PhoneTrack cuts the access at once (Gladys then sees a refusal).
 
 The **Share link** entries of the same panel (filtered public shares) are
-not supported by this version: use the API URL of the public session.
+not supported by this version: use the API URL of the public session. A
+watch page link (public watch link, filtered share) pasted in Gladys is
+refused with a clear message, before any request.
 
 ## Configuration
 
@@ -92,9 +94,8 @@ Only the created devices get their values.
   sends it.
 - **Accuracy** (m), **Altitude** (m), **Bearing** (°, 0 = north): as the
   logger sent them.
-- **Speed** (km/h): PhoneTrack stores meters per second; Gladys converts.
-  Some loggers (OwnTracks through PhoneTrack's OwnTracks address) send km/h,
-  which PhoneTrack stores as is: their speed then shows 3.6 times too high.
+- **Speed** (km/h): PhoneTrack stores meters per second (what its own pages
+  assume); Gladys converts. Not checked yet with every logger.
 - **Satellites**: only for the devices whose logger sends it (the feature
   appears in Discovery once seen; update the created device to add it).
 - **Last seen**: the time of the last position, as `2026-10-18 08:00 UTC`
@@ -112,22 +113,32 @@ Only the created devices get their values.
 
 Choose the device (or any) and the delay (**required**: 15 minutes to 24
 hours). The scene starts when the device has sent no new position for that
-long, at the next reading. **Once per silence**: again only after a new
-position. Never for a device that was already silent when the integration
-started (no event at the first reading), never for a device seen for the
-first time. Variables: device name, silent for (minutes), last seen.
+long, at the next reading. Only the devices created in Gladys (Discovery
+tab) fire. **Once per silence**: again only after a new position (younger
+than 15 minutes); a late batch of old points does not fire again. Never for
+a delay already reached when the integration starts (no event at the first
+reading), nor for a device seen for the first time, nor at a reading where
+the clock of Gladys jumped (set right after a start). At most 30 events per
+reading: the others leave at the next one. Variables: device name, silent
+for (minutes), last seen.
 
 ## Connection problems
 
 - **Token refused** (HTTP 401 or 403, or PhoneTrack's own "Session not
-  found" 404: the session is not public any more, the token is wrong, or an
-  authentication sits in front of Nextcloud): Nextcloud counts every refusal
-  as an attack and may slow down or block the address of Gladys. Gladys
-  therefore stops for **1 hour**, then **6 hours**, then **24 hours** after
-  each new refusal, never in a loop. The stop is kept in `/data`: a restart
-  or a reconnection of Gladys waits too, and so does the test button. Saving
-  the configuration tries once at once (a new refusal goes one step
-  further). A reading that works forgets the refusals.
+  found" 404: the session is not public any more, the token is wrong, an
+  authentication sits in front of Nextcloud, or a firewall / proxy blocks
+  Gladys): Nextcloud counts every refusal as an attack and may slow down or
+  block the address of Gladys. Gladys therefore stops for **1 hour**, then
+  **6 hours**, then **24 hours** after each new refusal, never in a loop.
+  The stop is kept in `/data`, even when the answer arrives while Gladys is
+  away: a restart or a reconnection of Gladys waits too, and so does the
+  test button. An attempt still in flight when the integration stops counts
+  as a refusal. Within a series of refusals, any other failure (a timeout)
+  also waits for the end of the current stop. Saving the configuration with
+  the same token makes **one** attempt at once per series of refusals;
+  after that the status says it was already tried again and when the next
+  attempt is. Another token or address is tried at once. A reading that
+  works forgets the refusals.
 - **Nextcloud busy** (HTTP 429, its brute-force protection) or **server
   error** (HTTP 5xx, maintenance): every request pauses, as long as
   Nextcloud asks (Retry-After) within 1 minute and 6 hours, never less than
@@ -136,8 +147,16 @@ first time. Variables: device name, silent for (minutes), last seen.
   unexpected answer): check the address and that the PhoneTrack app is
   enabled. Retried after the refresh interval (one minute at least), then
   the delay doubles up to 30 minutes.
-- **Nextcloud unreachable** (network, timeout, certificate): same retries;
-  the devices show as unreachable meanwhile. The integration never gives up.
+- **Answer too large** (above 2 MB) or an **internal error** of the
+  integration: said as such (never as "Nextcloud does not answer"), same
+  retries. A device with an impossible value (a date out of range) is
+  ignored alone: the others go on.
+- **Nextcloud unreachable** (network, timeout of 45 s, certificate): same
+  retries; the devices show as unreachable meanwhile. The integration never
+  gives up.
+- **Configuration not given by Gladys** at a reconnection: the last one
+  received is used, otherwise the status says so and it is read again
+  every minute.
 - **Test the connection** reads again and says how many devices answer; it
   never shortens a stop nor a pause.
 
@@ -158,7 +177,8 @@ read into Gladys.
   noted in the repository (TODO.md) and will come in a later version if
   Gladys accepts it. Until then, the zones of Gladys do not react to
   PhoneTrack.
-- One PhoneTrack session per integration, 50 devices at most.
+- One PhoneTrack session per integration, 50 devices at most (the devices
+  created in Gladys first, then the others by name).
 - Renaming a device in PhoneTrack makes a new Gladys device (the old one
   stays without values).
 - Planned later: the geofences of PhoneTrack in push, presence per zone,

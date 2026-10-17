@@ -7,8 +7,11 @@
 const WINDOW_MS = 60_000;
 
 export class Budget {
-  /** @param {{ perMinute: number, now?: () => number }} options */
-  constructor({ perMinute, now = Date.now }) {
+  /**
+   * @param {{ perMinute: number, now?: () => number }} options `now`: a
+   *   monotonic clock (a jump of the wall clock must not empty the window)
+   */
+  constructor({ perMinute, now = () => performance.now() }) {
     this.perMinute = perMinute;
     this.now = now;
     this.entries = []; // [at, count]

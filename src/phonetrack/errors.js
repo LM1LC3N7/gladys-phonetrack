@@ -46,8 +46,10 @@ export function isPhonetrackEnvelope(body) {
 }
 
 /**
- * The share refused: HTTP 401 or 403 (Nextcloud, or an authentication in
- * front of it), or HTTP 404 answered by PhoneTrack itself (the session is not
+ * The share refused: HTTP 401 or 403 (Nextcloud, an authentication in front
+ * of it, or a firewall / proxy that blocks Gladys: the status says so; a
+ * 403 is never retried quickly, the address may be counted as an attacker),
+ * or HTTP 404 answered by PhoneTrack itself (the session is not
  * public any more, the share was deleted, the token is wrong). A 404 page that
  * is not PhoneTrack's answer (wrong address, app not installed) is not a
  * refusal. Nextcloud counts every refusal as a brute-force attempt: the app

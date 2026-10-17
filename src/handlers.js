@@ -18,7 +18,8 @@ export function registerHandlers(gladys, app, logger) {
   // --- Configuration screen button --------------------------------------------------
   gladys.onAction(ACTIONS.TEST, () => app.testConnection());
 
-  // --- Configuration saved by the user: one attempt at once, even after a refusal.
+  // --- Configuration saved by the user: another token or address is tried at
+  // once; the same one once per series of refusals.
   gladys.onConfigUpdated((config) => {
     logger?.info('Configuration updated: restarting');
     return app.start(config, { force: true });
@@ -26,10 +27,11 @@ export function registerHandlers(gladys, app, logger) {
 
   // --- Connection lifecycle: (re)start on every connection (status and
   // Discovery sent again), pause while Gladys is away. A refusal or a pause
-  // kept in /data survives both.
+  // kept in /data survives both. A configuration that cannot be read falls
+  // back on the last one received, or is read again by a timer.
   gladys.on('connected', async () => {
     try {
-      await app.start(await gladys.getConfig());
+      await app.startFromGladys();
     } catch (err) {
       logger?.error('Start failed', err);
     }

@@ -48,11 +48,21 @@ test('the token field: a token, or a link of PhoneTrack that carries it', () => 
     `https://cloud.example.org/index.php/apps/phonetrack/api/getlastpositions/${TOKEN}`,
     `https://cloud.example.org/apps/phonetrack/api/getlastpositions/${TOKEN}`,
     `https://cloud.example.org/apps/phonetrack/api/getpositions/${TOKEN}?limit=number`,
-    `https://cloud.example.org/apps/phonetrack/publicSessionWatch/${TOKEN}?lineToggle=1`,
   ]) {
     const parsed = parseToken(link);
     assert.equal(parsed.token, TOKEN, link);
     assert.equal(parsed.linkServer.base, 'https://cloud.example.org', link);
+  }
+  // Watch pages (public session, filtered share): not supported.
+  for (const link of [
+    `https://cloud.example.org/apps/phonetrack/publicSessionWatch/${TOKEN}?lineToggle=1`,
+    `https://cloud.example.org/apps/phonetrack/publicWatch/${TOKEN}`,
+  ]) {
+    assert.deepEqual(parseToken(link), { error: 'unsupported' }, link);
+    const config = normalizeConfig({ token: link });
+    assert.equal(config.tokenUnsupported, true);
+    assert.equal(config.token, '');
+    assert.deepEqual(parseServerUrl(link), { error: 'link' }, 'never in the address field');
   }
   assert.equal(
     parseToken(`https://example.org/nc/index.php/apps/phonetrack/api/getlastpositions/${TOKEN}`)

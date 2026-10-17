@@ -61,7 +61,8 @@ Désactiver **Public session** dans PhoneTrack coupe l'accès aussitôt
 
 Les **Share link** du même panneau (partages publics filtrés) ne sont pas
 pris en charge par cette version : utilisez l'URL de l'API de la session
-publique.
+publique. Un lien de page de visualisation (lien public, partage filtré)
+collé dans Gladys est refusé avec un message clair, avant toute requête.
 
 ## Configuration
 
@@ -101,10 +102,9 @@ Seuls les appareils créés reçoivent leurs valeurs.
   l'envoie.
 - **Précision** (m), **Altitude** (m), **Cap** (°, 0 = nord) : tels que
   l'application les a envoyés.
-- **Vitesse** (km/h) : PhoneTrack stocke des mètres par seconde ; Gladys
-  convertit. Certaines applications (OwnTracks par l'adresse OwnTracks de
-  PhoneTrack) envoient des km/h, que PhoneTrack stocke tels quels : leur
-  vitesse paraît alors 3,6 fois trop élevée.
+- **Vitesse** (km/h) : PhoneTrack stocke des mètres par seconde (ce que
+  supposent ses propres pages) ; Gladys convertit. Pas encore vérifié avec
+  chaque application.
 - **Satellites** : seulement pour les appareils dont l'application l'envoie
   (la fonction apparaît dans la Découverte une fois vue ; mettez à jour
   l'appareil créé pour l'ajouter).
@@ -124,25 +124,35 @@ Seuls les appareils créés reçoivent leurs valeurs.
 
 Choisissez l'appareil (ou tous) et le délai (**obligatoire** : de 15
 minutes à 24 heures). La scène démarre quand l'appareil n'a envoyé aucune
-nouvelle position depuis ce délai, à la lecture suivante. **Une fois par
-silence** : de nouveau seulement après une nouvelle position. Jamais pour un
-appareil déjà muet au démarrage de l'intégration (aucun événement à la
-première lecture), jamais pour un appareil vu pour la première fois.
-Variables : nom de l'appareil, muet depuis (minutes), vu pour la dernière
-fois.
+nouvelle position depuis ce délai, à la lecture suivante. Seuls les
+appareils créés dans Gladys (onglet Découverte) déclenchent. **Une fois par
+silence** : de nouveau seulement après une nouvelle position (de moins de
+15 minutes) ; un lot tardif de vieux points ne relance rien. Jamais pour un
+délai déjà atteint au démarrage de l'intégration (aucun événement à la
+première lecture), ni pour un appareil vu pour la première fois, ni à une
+lecture où l'horloge de Gladys a sauté (remise à l'heure après un
+démarrage). 30 événements au plus par lecture : les autres partent à la
+suivante. Variables : nom de l'appareil, muet depuis (minutes), vu pour la
+dernière fois.
 
 ## Problèmes de connexion
 
 - **Jeton refusé** (HTTP 401 ou 403, ou le 404 « Session not found » de
-  PhoneTrack : la session n'est plus publique, le jeton est faux, ou une
-  authentification est placée devant Nextcloud) : Nextcloud compte chaque
-  refus comme une attaque et peut ralentir ou bloquer l'adresse de Gladys.
-  Gladys s'arrête donc **1 heure**, puis **6 heures**, puis **24 heures**
-  après chaque nouveau refus, jamais en boucle. L'arrêt est gardé dans
-  `/data` : un redémarrage ou une reconnexion de Gladys attend aussi, de
-  même que le bouton de test. Enregistrer la configuration fait un essai
-  tout de suite (un nouveau refus passe à l'étape suivante). Une lecture
-  réussie oublie les refus.
+  PhoneTrack : la session n'est plus publique, le jeton est faux, une
+  authentification est placée devant Nextcloud, ou un pare-feu / proxy
+  bloque Gladys) : Nextcloud compte chaque refus comme une attaque et peut
+  ralentir ou bloquer l'adresse de Gladys. Gladys s'arrête donc **1
+  heure**, puis **6 heures**, puis **24 heures** après chaque nouveau refus,
+  jamais en boucle. L'arrêt est gardé dans `/data`, même quand la réponse
+  arrive pendant que Gladys est absent : un redémarrage ou une reconnexion
+  de Gladys attend aussi, de même que le bouton de test. Un essai encore en
+  cours quand l'intégration s'arrête compte comme un refus. Pendant une
+  série de refus, toute autre panne (un délai dépassé) attend aussi la fin
+  de l'arrêt en cours. Enregistrer la configuration avec le même jeton fait
+  **un** essai tout de suite par série de refus ; ensuite le statut indique
+  qu'il a déjà été réessayé et quand aura lieu le prochain essai. Un autre
+  jeton ou une autre adresse est essayé tout de suite. Une lecture réussie
+  oublie les refus.
 - **Nextcloud surchargé** (HTTP 429, sa protection contre les attaques) ou
   **erreur serveur** (HTTP 5xx, maintenance) : toutes les requêtes sont
   suspendues, le temps que Nextcloud demande (Retry-After) entre 1 minute et
@@ -152,9 +162,16 @@ fois.
   une réponse inattendue) : vérifiez l'adresse et que l'application
   PhoneTrack est activée. Nouvel essai après le rafraîchissement (une minute
   au moins), puis le délai double jusqu'à 30 minutes.
-- **Nextcloud injoignable** (réseau, délai, certificat) : mêmes essais ; les
-  appareils apparaissent injoignables entre-temps. L'intégration n'abandonne
-  jamais.
+- **Réponse trop grande** (plus de 2 Mo) ou **erreur interne** de
+  l'intégration : dit comme tel (jamais « Nextcloud ne répond pas »), mêmes
+  essais. Un appareil avec une valeur impossible (une date hors limites)
+  est ignoré seul : les autres continuent.
+- **Nextcloud injoignable** (réseau, délai de 45 s dépassé, certificat) :
+  mêmes essais ; les appareils apparaissent injoignables entre-temps.
+  L'intégration n'abandonne jamais.
+- **Configuration non transmise par Gladys** à une reconnexion : la
+  dernière reçue sert, sinon le statut le dit et elle est relue toutes les
+  minutes.
 - **Tester la connexion** relit et dit combien d'appareils répondent ; il
   ne raccourcit jamais un arrêt ni une pause.
 
@@ -176,7 +193,8 @@ Gladys.
   petite modification de Gladys est nécessaire ; elle est notée dans le
   dépôt (TODO.md) et viendra dans une version suivante si Gladys l'accepte.
   D'ici là, les zones de Gladys ne réagissent pas à PhoneTrack.
-- Une session PhoneTrack par intégration, 50 appareils au plus.
+- Une session PhoneTrack par intégration, 50 appareils au plus (les
+  appareils créés dans Gladys d'abord, puis les autres par nom).
 - Renommer un appareil dans PhoneTrack crée un nouvel appareil Gladys
   (l'ancien reste sans valeurs).
 - Prévu plus tard : les zones (geofences) de PhoneTrack en push, la

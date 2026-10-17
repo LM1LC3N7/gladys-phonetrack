@@ -32,6 +32,15 @@ up to date at the end of every milestone.
       fake PhoneTrack (in memory and on loopback https) and loopback http /
       https servers. **Never tested with a real Nextcloud.** No Docker on
       this PC: no e2e test in a container.
+- [x] **Review corrections** (2026-10-18, extra review of `e4f89f8`, 3
+      important and 13 minor points): failures persisted whatever the
+      generation, pending attempt, one forced attempt per series, bounded
+      timestamps and isolated devices, internal / too-large messages,
+      thresholds re-armed below 15 min only, clock jump and future points,
+      created devices only, events marked once sent, cap keeps created
+      devices, PHP list sessions, watch links refused, step wait on
+      timeouts, read-back cap per step, configuration fallback, 403 text,
+      docs; `test/timezone.test.js` (Lisbon, Helsinki). See "Decisions".
 - [ ] **Milestone 2 — real Nextcloud** (a tester with PhoneTrack): record a
       real answer as a fixture (token and positions removed), fix what
       differs. To check first:
@@ -42,11 +51,14 @@ up to date at the end of every milestone.
   - Nextcloud's brute-force protection on that route
     (`#[BruteForceProtection(action: 'PhonetrackAPIGetLastPositionsPublic')]`):
     how long the answers are slowed down after a refusal, when it answers
-    429, whether the 30 s timeout is enough;
+    429, whether the 45 s timeout is enough;
   - pretty URLs: `/index.php/apps/...` always works? (`/apps/...` is used by
     the links PhoneTrack shows);
-  - the speed of each logger (PhoneTrack Android, OwnTracks, GpsLogger):
-    m/s as PhoneTrack's pages assume, or km/h stored as is (OwnTracks);
+  - the speed of each logger (PhoneTrack Android, GpsLogger, uLogger...):
+    m/s as PhoneTrack's pages assume? Open question for OwnTracks: its
+    `vel` is km/h, but PhoneTrack's `logOwntracks` stores no speed at all
+    (read in the source): to confirm on a real server, nothing said in the
+    docs meanwhile;
   - `timestamp` of a point: the clock of the phone (a phone with a wrong
     clock looks silent or not);
   - the batch upload of old points (a phone offline for hours).
@@ -137,8 +149,13 @@ The minimal change, to propose to the core (not opened, Louis decides):
   do not react to PhoneTrack yet.
 - **Token field**: a `secret` field (kept in clear in the Gladys database,
   masked in the UI, never shown again: never written "encrypted"). It takes
-  the token or a whole link (API URL, public watch link); from a link, only
-  the token and the Nextcloud address are kept. A link typed in the address
+  the token or a whole API link (`api/getlastpositions/<token>` or
+  `api/getpositions/<token>`); from a link, only the token and the
+  Nextcloud address are kept. A watch page link (`publicSessionWatch`,
+  `publicWatch`: public session or filtered share) is refused with
+  "filtered share not supported", before any request (review point 10:
+  a filtered share token would get a 404, counted as a brute-force
+  attempt). A link typed in the address
   field (shown in clear) is refused; a link pointing to another server than
   the typed address is refused (the token never goes elsewhere). The token
   must match `[A-Za-z0-9_-]{6,128}`.
@@ -172,33 +189,66 @@ The minimal change, to propose to the core (not opened, Louis decides):
 - **Silent**: from the timestamp of the last point (phone clock) and the
   clock of Gladys; a point "from the future" counts as 0 min. The feature
   uses the configured delay (`silent_minutes`, 1 h by default).
+  Timestamps are bounded (0 < s < 1e11 seconds, else no date) and
+  `formatDate` returns null for an impossible date; each device is parsed
+  and processed alone (an unreadable one is skipped, the others go on).
 - **Trigger `device_silent`**: the core matches fields by equality only
   (spec scene-triggers §4.2: no threshold), so the delay is a **required**
   select field `minutes` (same 8 values as the configuration, sent as a
   string): the integration fires one event per threshold reached, once per
-  silence (a threshold is re-armed only by a point younger than it, so a
-  late batch of old points does not fire again). A device seen for the
-  first time (start of the integration, a new device) only records what is
-  already reached: "not at the first reading". The memory is kept in RAM
-  across a reconnection to Gladys (same server and session), never in
-  `/data`; a restart of the container starts over (no event for what is
-  already reached then). After an outage of Nextcloud, a threshold crossed
-  meanwhile fires at the first reading that works (late, once). Data:
-  `device` (external id), `minutes`, `device_name`, `silent_for`
-  (minutes), `last_seen`; never a position. At most 30 events per reading.
+  silence. Review corrections:
+  - only devices created in Gladys fire (keys of `gladys.devices`); the
+    others only record what they reach (creating one later fires nothing
+    for a delay already reached);
+  - the thresholds reached are cleared only when the age falls under the
+    smallest one (15 min): a late batch of old points (age 100 min after
+    120 fired) never fires 120 again;
+  - a threshold is marked reached only once its event left (a failed
+    publication is retried); beyond 30 events per reading, the rest waits
+    for the next reading;
+  - "not at the first reading": a device seen for the first time (start of
+    the integration, a new device) only records what is already reached; a
+    point more than 5 min in the future (clock of Gladys late at start) is
+    no baseline; a jump of the wall clock between two readings (Date.now
+    against performance.now, more than 5 min apart) makes that reading a
+    new baseline (no event). The state budget runs on performance.now.
+    The memory is kept in RAM across a reconnection to Gladys (same server and
+    session), never in `/data`; a restart of the container starts over. After
+    an outage of Nextcloud, a threshold crossed meanwhile fires at the first
+    reading that works (late, once). Data: `device` (external id), `minutes`,
+    `device_name`, `silent_for` (minutes), `last_seen`; never a position.
+- **Cap of 50 devices**: the devices created in Gladys first, then the
+  others by name (review point 8). A session that PHP encodes as a list
+  (keys 0..n-1) is read, the indexes being the names.
 - **Refusals** (brief: "1 h, 6 h, 24 h, never a loop"): HTTP 401, 403 (any
-  body: Nextcloud, or an authentication in front of it), and 404 when the
-  body is PhoneTrack's JSON `{ "error": ... }` (session not public, share
-  deleted, wrong token). A 404 page that is not PhoneTrack's (wrong folder,
-  app disabled) is not a refusal: retried like an unexpected answer. Step
-  1 → 1 h, 2 → 6 h, then 24 h for every refusal after; persisted in `/data`
-  as `<HMAC of address and token>|<step>|<end>` (end capped to now + 24 h
-  when read back, written back). After the stop, one attempt. A restart, a
-  reconnection to Gladys and the test button wait; **saving the
-  configuration makes one attempt at once** (prudent choice: the user just
-  fixed something; a new refusal moves to the next, longer step, so this
-  is never a loop); a token or address that changed drops the old entry.
-  A reading that works forgets the refusal.
+  body: Nextcloud, an authentication in front of it, or a firewall / proxy
+  blocking Gladys: kept as a refusal, the status names that cause), and 404
+  when the body is PhoneTrack's JSON `{ "error": ... }` (session not public,
+  share deleted, wrong token). A 404 page that is not PhoneTrack's (wrong
+  folder, app disabled) is not a refusal: retried like an unexpected
+  answer. Step 1 → 1 h, 2 → 6 h, then 24 h for every refusal after;
+  persisted in `/data` as JSON `{ k: HMAC of address and token, s: step,
+u: end, p: pending, f: forced }` under a salted digest of the address.
+  - **Never lost** (review point 1): the context (server key, HMAC, step,
+    interval) is captured when the request is sent and travels with its
+    failure; the refusal or the pause is written to `/data` as soon as the
+    answer arrives, before the badges, whatever the generation (Gladys
+    disconnected, a new configuration started); only the rescheduling is
+    skipped for an older generation. A success likewise clears them.
+  - **Pending attempt**: before an attempt within a series of refusals,
+    `p: true` is written; a start that finds it counts one more refusal.
+  - **Within a series of refusals** any other failure (timeout, network,
+    429 / 5xx) waits for the end of the current step again (max with the
+    pause): never a faster retry (review point 11).
+  - **Read back**: the end is capped by the delay of its own step
+    (now + 1 h / 6 h / 24 h), written back (review point 12).
+  - **Saving the configuration** (Louis's decision, option b): one forced
+    attempt per series of refusals, flag `f` persisted, cleared only by a
+    reading that works or a change of key (another token or address is
+    tried at once, the old entry dropped). After it, saving says "already
+    tried again, next attempt in X". Restarts, reconnections and the test
+    button always wait.
+    A reading that works forgets the refusal.
 - **Pauses**: HTTP 429 pauses every path for its Retry-After, bounded
   max(1 min, poll interval) to 6 h; 5xx pauses for the back-off delay (or a
   longer Retry-After, up to 6 h). Persisted in `/data`, capped when read
@@ -207,12 +257,21 @@ The minimal change, to propose to the core (not opened, Louis decides):
   max(1 min, poll interval), doubling up to 30 min; never a dead
   integration. An error is never read again faster than the interval, a
   reconnection to Gladys included (retry wait kept in memory).
-- **Timeout 30 s, test button 60 s** (budget 50 s): Nextcloud slows the
+- **Timeout 45 s, test button 60 s** (budget 55 s): Nextcloud slows the
   answers of a suspected address (up to 25 s) before it refuses them.
+- **Messages**: a failure that is not a `PhonetrackError` (a fault of the
+  integration) says "internal error" and is logged as an error, never
+  "Nextcloud does not answer"; an answer above 2 MB says "too large".
 - **Reconnection to Gladys** (`connected`): the app restarts; the status and
   Discovery are sent again (`lastStatus`, `discoveredKey`, published values
   and badges cleared); refusals and pauses come from `/data`; during a stop
   or a pause, Discovery is republished from the devices last read (memory).
+  If `GET /config` fails, the last configuration the SDK received
+  (`gladys.config`) is used; without any, the status says so and a timer
+  reads it again every minute (never without status nor timer).
+- **Time zones**: every date is UTC; `test/timezone.test.js` runs
+  `test/app.test.js` again in child processes with TZ=Europe/Lisbon and
+  TZ=Europe/Helsinki.
 - **Never a smaller device**: the published device keeps every feature of
   the created one in `gladys.devices` (lesson of lot 6).
 - **TLS**: strict by default; a typed SHA-256 fingerprint must match

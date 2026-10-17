@@ -124,8 +124,8 @@
       "key": "test_connection",
       "label": { "en": "Test the connection", "fr": "Tester la connexion" },
       "description": {
-        "en": "Reads the last positions again and says how many devices answer. After a refusal of the token, only saving the configuration tries again before the end of the stop.",
-        "fr": "Relit les dernières positions et indique combien d'appareils répondent. Après un refus du jeton, seul l'enregistrement de la configuration réessaie avant la fin de l'arrêt."
+        "en": "Reads the last positions again and says how many devices answer. After a refusal of the token, this button waits for the end of the stop; saving the configuration tries the same token again once per series of refusals (another token at once).",
+        "fr": "Relit les dernières positions et indique combien d'appareils répondent. Après un refus du jeton, ce bouton attend la fin de l'arrêt ; enregistrer la configuration réessaie le même jeton une fois par série de refus (un autre jeton tout de suite)."
       },
       "timeout_seconds": 60
     }
@@ -135,8 +135,8 @@
       "key": "device_silent",
       "label": { "en": "Device silent", "fr": "Appareil muet" },
       "description": {
-        "en": "A PhoneTrack device sent no new position for the chosen time. Once per silence: again only after a new position. Never for a device already silent when Gladys starts. Read at the chosen refresh.",
-        "fr": "Un appareil PhoneTrack n'a envoyé aucune nouvelle position depuis le délai choisi. Une fois par silence : de nouveau seulement après une nouvelle position. Jamais pour un appareil déjà muet au démarrage de Gladys. Lu au rythme du rafraîchissement."
+        "en": "A PhoneTrack device created in Gladys sent no new position for the chosen time. Once per silence: again only after a new position. Never for a delay already reached when the integration starts. Read at the chosen refresh.",
+        "fr": "Un appareil PhoneTrack créé dans Gladys n'a envoyé aucune nouvelle position depuis le délai choisi. Une fois par silence : de nouveau seulement après une nouvelle position. Jamais pour un délai déjà atteint au démarrage de l'intégration. Lu au rythme du rafraîchissement."
       },
       "fields": [
         {

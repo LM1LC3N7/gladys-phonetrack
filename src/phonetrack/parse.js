@@ -26,7 +26,9 @@ export function parseDevice(name, entry) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
   const lat = within(entry.lat, -90, 90);
   const lon = within(entry.lon, -180, 180);
-  const seconds = finite(entry.timestamp);
+  // Seconds since 1970, bounded (0 < s < 1e11): a date Node cannot write
+  // (or a timestamp in ms) is no date.
+  const seconds = within(entry.timestamp, Number.MIN_VALUE, 1e11 - 1);
   const speed = within(entry.speed, 0, 1000);
   let bearing = within(entry.bearing, 0, 360);
   if (bearing !== null) bearing = Math.round(bearing) % 360;
@@ -60,13 +62,18 @@ export function parseLastPositions(value, token) {
     if (keys.length !== 1 || keys[0] === 'error') return null;
     session = value[keys[0]];
   }
-  // An empty session: PHP encodes an empty map as [].
-  if (Array.isArray(session) && session.length === 0) return [];
-  if (!session || typeof session !== 'object' || Array.isArray(session)) return null;
+  // PHP encodes an empty map as [], and a map with keys 0..n-1 as a list:
+  // the names are then the indexes.
+  if (!session || typeof session !== 'object') return null;
   const devices = [];
   for (const [name, entry] of Object.entries(session)) {
-    const device = parseDevice(name, entry);
-    if (device) devices.push(device);
+    // One unreadable device never blocks the others.
+    try {
+      const device = parseDevice(name, entry);
+      if (device) devices.push(device);
+    } catch {
+      // skipped
+    }
   }
   devices.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return devices;
@@ -75,6 +82,8 @@ export function parseLastPositions(value, token) {
 /** `YYYY-MM-DD HH:MM UTC`, or null. */
 export function formatDate(ms) {
   if (ms === null || ms === undefined || !Number.isFinite(ms)) return null;
-  const iso = new Date(ms).toISOString();
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return null;
+  const iso = date.toISOString();
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }

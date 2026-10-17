@@ -41,7 +41,7 @@ async function setup({
   dataDir,
   now = T0,
 } = {}) {
-  const clock = { now };
+  const clock = { now, jump: 0 };
   phonetrack ??= createFakePhonetrack();
   const gladys = createFakeGladys({
     selector: SELECTOR,
@@ -63,6 +63,9 @@ async function setup({
     request: phonetrack.request,
     dataDir,
     now: () => clock.now,
+    // The monotonic clock follows the test clock unless a test makes the
+    // wall clock jump (clock.jump).
+    monotonic: () => clock.now - clock.jump,
     timers,
   });
   running = app;
@@ -184,6 +187,18 @@ test('the silent trigger: once per silence and threshold, never at the first rea
   clock.now = T0 + 47 * MIN;
   await poll(timers);
   assert.equal(gladys.fake.sceneEvents.length, 4);
+  // Bob: 120 fired; a late batch puts him at 100 min: 120 is not fired again.
+  phonetrack.devices.Bob = point({ timestamp: (T0 + 48 * MIN - 100 * MIN) / 1000 });
+  clock.now = T0 + 48 * MIN;
+  await poll(timers);
+  clock.now = T0 + 70 * MIN;
+  await poll(timers);
+  assert.ok(
+    !events()
+      .slice(4)
+      .some(([name]) => name === 'Bob'),
+    'no second 120 for Bob',
+  );
 });
 
 test('a restart of the app (Gladys came back) keeps the silences: no event again', async () => {
@@ -439,4 +454,214 @@ test('Discovery (scan): one reading, published', async () => {
   await gladys.fake.scanRequest();
   assert.equal(phonetrack.requests.length, before + 1);
   assert.equal(gladys.fake.discoveredDevices.length, 2);
+});
+
+const NOT_FOUND = { status: 404, body: '{"error":"Session not found"}' };
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+/** Hold the next answers of the fake PhoneTrack until release() is called. */
+function hold(phonetrack) {
+  let release;
+  phonetrack.gate = new Promise((resolve) => {
+    release = () => {
+      phonetrack.gate = null;
+      resolve();
+    };
+  });
+  return () => release();
+}
+
+for (const [label, failure, delay, message] of [
+  ['a refusal', NOT_FOUND, HOUR, /refused this token earlier/],
+  ['a 429', { status: 429, headers: { 'retry-after': '3600' } }, HOUR, /pause goes on/],
+]) {
+  test(`${label} answered while Gladys was away is kept: the reconnection waits`, async () => {
+    const { gladys, phonetrack, timers, app } = await setup();
+    phonetrack.failures.push(failure);
+    const release = hold(phonetrack);
+    const sent = phonetrack.requests.length;
+    const polling = poll(timers);
+    for (let i = 0; i < 100 && phonetrack.requests.length === sent; i += 1) await tick();
+    assert.equal(phonetrack.requests.length, sent + 1, 'the request left');
+    gladys.emit('disconnected');
+    await tick();
+    release();
+    await polling;
+    const requests = phonetrack.requests.length;
+    await reconnect(gladys, app);
+    assert.equal(phonetrack.requests.length, requests, 'nothing sent at the reconnection');
+    assert.deepEqual(timers.delays(), [delay]);
+    assert.match(gladys.fake.connectionStatus.message.en, message);
+  });
+}
+
+test('an attempt after a refusal still in flight at a restart counts as a refusal', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pt-app-'));
+  const { phonetrack, timers, clock } = await setup({ config: { token: WRONG }, dataDir });
+  clock.now = T0 + HOUR;
+  const release = hold(phonetrack);
+  const attempt = timers.run();
+  for (let i = 0; i < 100 && phonetrack.requests.length < 2; i += 1) await tick();
+  assert.equal(phonetrack.requests.length, 2, 'the attempt left');
+  // The container restarts before the answer.
+  const second = await setup({ config: { token: WRONG }, dataDir, phonetrack, now: T0 + HOUR });
+  assert.equal(phonetrack.requests.length, 2);
+  assert.deepEqual(second.timers.delays(), [6 * HOUR], 'one more step');
+  release();
+  await attempt;
+});
+
+test('saving the same refused token: one forced attempt per series of refusals', async () => {
+  const { gladys, phonetrack } = await setup({ config: { token: WRONG } });
+  assert.equal(phonetrack.requests.length, 1);
+  for (let i = 0; i < 5; i += 1) await gladys.fake.configUpdated({ ...BASE_CONFIG, token: WRONG });
+  assert.equal(phonetrack.requests.length, 2, '5 saves, 1 request');
+  assert.match(gladys.fake.connectionStatus.message.en, /Already tried again.*next attempt in 6 h/);
+  // Another token is tried at once.
+  await gladys.fake.configUpdated({ ...BASE_CONFIG });
+  assert.equal(phonetrack.requests.length, 3);
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+});
+
+test('within a series of refusals, a timeout waits for the end of the step', async () => {
+  const { gladys, phonetrack, timers, clock } = await setup({ config: { token: WRONG } });
+  phonetrack.unreachable = true;
+  clock.now = T0 + HOUR;
+  await timers.run();
+  assert.equal(phonetrack.requests.length, 2);
+  assert.deepEqual(timers.delays(), [HOUR], 'not one minute');
+  assert.match(gladys.fake.connectionStatus.message.en, /does not answer/);
+});
+
+test('a refusal read back is capped by the delay of its own step', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pt-app-'));
+  const { phonetrack } = await setup({ config: { token: WRONG }, dataDir });
+  await running.stop();
+  // The clock went back 20 h: the 1 h stop would otherwise last 21 h.
+  const second = await setup({
+    config: { token: WRONG },
+    dataDir,
+    phonetrack,
+    now: T0 - 20 * HOUR,
+  });
+  assert.deepEqual(second.timers.delays(), [HOUR]);
+});
+
+test('403: a refusal, the status names a firewall or a proxy', async () => {
+  const phonetrack = createFakePhonetrack();
+  phonetrack.failures.push({ status: 403, body: '<html>Forbidden</html>' });
+  const { gladys, timers } = await setup({ phonetrack });
+  assert.match(gladys.fake.connectionStatus.message.en, /firewall \/ proxy blocks Gladys/);
+  assert.deepEqual(timers.delays(), [HOUR]);
+});
+
+test('one device with an absurd date never blocks the others', async () => {
+  const phonetrack = createFakePhonetrack();
+  phonetrack.devices.Bob = point({ timestamp: 1e15 });
+  const { gladys } = await setup({ phonetrack });
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  assert.equal(last(gladys, 'Alice', 'latitude'), 48.8566);
+  assert.equal(last(gladys, 'Bob', 'last_seen'), undefined, 'no date');
+  assert.equal(last(gladys, 'Bob', 'battery'), 87);
+});
+
+test('an internal error is never shown as Nextcloud not answering; too large is said', async () => {
+  const { gladys, timers, app, logs } = await setup();
+  app.statesOf = () => {
+    throw new TypeError('boom');
+  };
+  await poll(timers);
+  assert.match(gladys.fake.connectionStatus.message.en, /Internal error of the integration/);
+  assert.ok(logs.some((l) => l.startsWith('error Internal error')));
+  delete app.statesOf;
+  const big = createFakePhonetrack();
+  big.request = async () => {
+    const { PhonetrackError, CODES } = await import('../src/phonetrack/errors.js');
+    throw new PhonetrackError(CODES.TOO_LARGE, 'Answer above 2097152 bytes');
+  };
+  const second = await setup({ phonetrack: big });
+  assert.match(second.gladys.fake.connectionStatus.message.en, /answer is too large/);
+  assert.doesNotMatch(second.gladys.fake.connectionStatus.message.en, /does not answer/);
+});
+
+test('only the devices created in Gladys fire; a point in the future is no baseline', async () => {
+  const phonetrack = createFakePhonetrack();
+  // Carol is not created; Dan's point is 10 min in the future (Gladys late).
+  phonetrack.devices.Carol = point();
+  phonetrack.devices.Dan = point({ timestamp: (T0 + 10 * MIN) / 1000 });
+  const { gladys, timers, clock } = await setup({
+    phonetrack,
+    created: [device('Alice'), device('Bob', { hasSatellites: true }), device('Dan')],
+  });
+  // The clock of Gladys is set right: Dan is in fact 20 min silent.
+  clock.now = T0 + 30 * MIN;
+  await poll(timers);
+  const names = gladys.fake.sceneEvents.map((e) => e.data.device_name);
+  assert.ok(!names.includes('Carol'), 'not created: no event');
+  assert.ok(!names.includes('Dan'), 'first real reading of Dan: baseline');
+  assert.ok(names.includes('Alice'));
+});
+
+test('a jump of the wall clock makes the reading a new baseline', async () => {
+  const { gladys, timers, clock } = await setup();
+  clock.now = T0 + 20 * MIN;
+  clock.jump = 19 * MIN; // the wall clock moved 19 min more than the monotonic one
+  await poll(timers);
+  assert.equal(gladys.fake.sceneEvents.length, 0, 'Alice crossed 15 min only through the jump');
+  clock.now = T0 + 40 * MIN;
+  await poll(timers);
+  assert.deepEqual(
+    gladys.fake.sceneEvents.map((e) => [e.data.device_name, e.data.minutes]),
+    [
+      ['Alice', '30'],
+      ['Bob', '120'],
+    ],
+    'only what was crossed after the jump',
+  );
+});
+
+test('30 events per reading at most: the rest leaves at the next reading', async () => {
+  const phonetrack = createFakePhonetrack();
+  phonetrack.devices = {};
+  const created = [];
+  for (let i = 0; i < 40; i += 1) {
+    const name = `P${String(i).padStart(2, '0')}`;
+    phonetrack.devices[name] = point({ timestamp: (T0 - MIN) / 1000 });
+    created.push(device(name));
+  }
+  const { gladys, timers, clock } = await setup({ phonetrack, created });
+  clock.now = T0 + 14 * MIN;
+  await poll(timers);
+  assert.equal(gladys.fake.sceneEvents.length, 30);
+  clock.now = T0 + 15 * MIN;
+  await poll(timers);
+  assert.equal(gladys.fake.sceneEvents.length, 40, 'the 10 others, once');
+  clock.now = T0 + 16 * MIN;
+  await poll(timers);
+  assert.equal(gladys.fake.sceneEvents.length, 40);
+});
+
+test('the cap of 50 keeps the created devices first', async () => {
+  const phonetrack = createFakePhonetrack();
+  phonetrack.devices = {};
+  for (let i = 0; i < 60; i += 1) phonetrack.devices[`P${String(i).padStart(2, '0')}`] = point();
+  const { gladys } = await setup({ phonetrack, created: [device('P59')] });
+  assert.equal(last(gladys, 'P59', 'latitude'), 48.8566, 'created: followed beyond the 50th');
+  const names = gladys.fake.discoveredDevices.map((d) => d.name);
+  assert.equal(names.length, 50);
+  assert.ok(names.includes('P59') && !names.includes('P49'));
+});
+
+test('the configuration of Gladys cannot be read: the last one, or a status and a timer', async () => {
+  const { gladys, phonetrack, timers, app } = await setup();
+  gladys.getConfig = async () => {
+    throw new Error('HTTP 500');
+  };
+  const before = phonetrack.requests.length;
+  await reconnect(gladys, app);
+  assert.equal(phonetrack.requests.length, before + 1, 'the last configuration received');
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  gladys.config = {};
+  await reconnect(gladys, app);
+  assert.match(gladys.fake.connectionStatus.message.en, /did not give the configuration/);
+  assert.deepEqual(timers.delays(), [60_000]);
 });

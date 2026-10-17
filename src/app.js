@@ -39,12 +39,19 @@ import { buildDevice, createdDevices, deviceIds, deviceKey, sessionKey } from '.
 import { T } from './i18n.js';
 import { Store } from './store.js';
 import { PhonetrackClient } from './phonetrack/client.js';
-import { CODES, isRefused } from './phonetrack/errors.js';
+import { CODES, PhonetrackError, isRefused } from './phonetrack/errors.js';
 import { httpRequest } from './phonetrack/http.js';
 import { formatDate } from './phonetrack/parse.js';
 
 /** The "Test the connection" button waits 60 s: answer before. */
-const TEST_BUDGET_MS = 50_000;
+const TEST_BUDGET_MS = 55_000;
+/** A point this far in the future (clock of Gladys late) is not a baseline. */
+const FUTURE_MS = 5 * 60_000;
+/** Wall clock and monotonic clock apart by more than this: the clock jumped. */
+const CLOCK_JUMP_MS = 5 * 60_000;
+/** The configuration could not be read from Gladys: try again after this. */
+const CONFIG_RETRY_MS = 60_000;
+const MINUTE = 60_000;
 /** Entries per publishTransports call (the SDK refuses more). */
 export const TRANSPORTS_PER_CALL = 100;
 const THRESHOLDS = SILENT_MINUTES.map(Number);
@@ -59,7 +66,8 @@ export class PhonetrackApp {
    * @param {object} [options.logger]
    * @param {Function} [options.request] the HTTP transport (tests inject a fake PhoneTrack)
    * @param {string} [options.dataDir] the writable volume
-   * @param {() => number} [options.now]
+   * @param {() => number} [options.now] the wall clock (ms)
+   * @param {() => number} [options.monotonic] a clock that never jumps (ms)
    * @param {{ setTimeout: Function, clearTimeout: Function }} [options.timers]
    */
   constructor({
@@ -68,15 +76,19 @@ export class PhonetrackApp {
     request = httpRequest,
     dataDir = process.env.DATA_DIR ?? '/data',
     now = Date.now,
+    monotonic = () => performance.now(),
     timers = globalThis,
   }) {
     this.gladys = gladys;
     this.logger = logger;
     this.request = request;
     this.now = now;
+    this.monotonic = monotonic;
     this.timers = timers;
     this.store = new Store({ filePath: join(dataDir, STORE_FILE), logger });
-    this.budget = new Budget({ perMinute: LIMITS.STATES_PER_MINUTE, now });
+    this.budget = new Budget({ perMinute: LIMITS.STATES_PER_MINUTE, now: monotonic });
+    /** Both clocks at the last reading (a jump of the wall clock is a new baseline). */
+    this.lastClock = null;
     this.rawConfig = {};
     this.config = normalizeConfig();
     this.client = null;
@@ -184,13 +196,73 @@ export class PhonetrackApp {
     this.client = null;
   }
 
-  /** The refusal kept for this server: { key, step, until } or null. */
-  storedRefusal(base) {
-    const raw = this.store.get('refusals', base);
+  /**
+   * The refusal kept for this server: { key, step, until, pending, forced }
+   * or null. `pending`: an attempt was in flight (counted as a refusal if
+   * the app stopped before its answer); `forced`: the one attempt a saved
+   * configuration may make in this series of refusals was used.
+   */
+  storedRefusal(baseKey) {
+    const raw = baseKey ? this.store.get('refusals', baseKey) : null;
     if (!raw) return null;
-    const [key, step, until] = raw.split('|');
-    const parsed = { key, step: Number(step) || 1, until: Number(until) || 0 };
-    return key ? parsed : null;
+    try {
+      const value = JSON.parse(raw);
+      if (typeof value?.k !== 'string' || !value.k) return null;
+      return {
+        key: value.k,
+        step: Math.max(1, Math.floor(Number(value.s)) || 1),
+        until: Number(value.u) || 0,
+        pending: value.p === true,
+        forced: value.f === true,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async writeRefusal(baseKey, refusal) {
+    const value = refusal
+      ? JSON.stringify({
+          k: refusal.key,
+          s: refusal.step,
+          u: refusal.until,
+          p: refusal.pending === true,
+          f: refusal.forced === true,
+        })
+      : null;
+    await this.store.set('refusals', baseKey, value);
+  }
+
+  /** The stop after the n-th refusal in a row: 1 h, 6 h, then 24 h. */
+  stepDelay(step) {
+    const steps = INTERVALS.REFUSAL_STEPS_MS;
+    return steps[Math.min(Math.max(1, step), steps.length) - 1];
+  }
+
+  /**
+   * Start from the configuration kept by Gladys (at every connection). If it
+   * cannot be read, the last one the SDK received is used; without any, the
+   * status says so and a timer tries again: never without status nor timer.
+   */
+  async startFromGladys() {
+    let config;
+    try {
+      config = await this.gladys.getConfig();
+    } catch (err) {
+      this.logger.warn(`Configuration not read from Gladys: ${err.message}`);
+      const kept = this.gladys.config;
+      if (kept && typeof kept === 'object' && Object.keys(kept).length > 0) {
+        config = kept;
+      } else {
+        await this.enqueue(async () => {
+          this.halt();
+          await this.setStatus(false, T.status.configUnreadable);
+          this.schedule(CONFIG_RETRY_MS, () => this.startFromGladys());
+        });
+        return;
+      }
+    }
+    await this.start(config);
   }
 
   async run(rawConfig, { force = false, immediate = false } = {}) {
@@ -206,6 +278,10 @@ export class PhonetrackApp {
     this.lastStatus = null;
     await this.store.load();
 
+    if (config.tokenUnsupported) {
+      await this.stopWith(T.status.tokenUnsupported);
+      return;
+    }
     if (config.urlError) {
       const message = {
         missing: T.status.urlMissing,
@@ -252,25 +328,44 @@ export class PhonetrackApp {
       .digest('hex')
       .slice(0, 32);
     // A refusal of these very values: wait for the end of its stop (1 h,
-    // 6 h, 24 h), unless the configuration was just saved (one attempt).
+    // 6 h, 24 h). Saving the configuration makes one attempt per series of
+    // refusals; another token or address is tried at once.
     const base = this.baseKey;
-    const refusal = this.storedRefusal(base);
+    let refusal = this.storedRefusal(base);
     const key = await this.refusalKey(config);
     if (refusal && refusal.key !== key) {
-      await this.store.set('refusals', base, null);
-    } else if (refusal) {
-      this.refusalStep = refusal.step;
-      const cap = this.now() + INTERVALS.REFUSAL_STEPS_MS.at(-1);
-      const until = Math.min(refusal.until, cap);
-      if (until < refusal.until) {
-        await this.store.set('refusals', base, `${refusal.key}|${refusal.step}|${until}`);
+      await this.writeRefusal(base, null);
+      refusal = null;
+    }
+    if (refusal) {
+      if (refusal.pending) {
+        // An attempt was in flight when the app stopped: its answer is
+        // unknown, so it counts as one more refusal (never a loop).
+        const step = refusal.step + 1;
+        refusal = { ...refusal, step, until: this.now() + this.stepDelay(step), pending: false };
+        await this.writeRefusal(base, refusal);
       }
-      if (!force && this.now() < until) {
-        this.blocked = true;
-        await this.publishKnown();
-        await this.setStatus(false, T.status.stillRefused(until - this.now()));
-        this.schedule(until - this.now(), () => this.retryAfterRefusal(generation));
-        return;
+      this.refusalStep = refusal.step;
+      // The end read back is capped by the delay of its own step.
+      const until = Math.min(refusal.until, this.now() + this.stepDelay(refusal.step));
+      if (until < refusal.until) {
+        refusal = { ...refusal, until };
+        await this.writeRefusal(base, refusal);
+      }
+      if (this.now() < until) {
+        if (force && !refusal.forced) {
+          await this.writeRefusal(base, { ...refusal, forced: true });
+        } else {
+          this.blocked = true;
+          await this.publishKnown();
+          const message =
+            force && refusal.forced
+              ? T.status.alreadyRetried(until - this.now())
+              : T.status.stillRefused(until - this.now(), refusal.forced);
+          await this.setStatus(false, message);
+          this.schedule(until - this.now(), () => this.retryAfterRefusal(generation));
+          return;
+        }
       }
     }
     // A pause (HTTP 429 or 5xx) outlives a restart, a reconnection to Gladys
@@ -379,63 +474,108 @@ export class PhonetrackApp {
     try {
       await this.refresh({ publish: false });
     } catch (err) {
+      // What Nextcloud answered is kept in /data even when this loop is no
+      // longer the current one; only the rescheduling is skipped then.
       if (this.current(generation, epoch)) await this.failed(err, generation);
+      else await this.persistFailure(err);
       return;
     }
     if (this.current(generation, epoch)) this.scheduleLoop(this.pollMs(), generation);
   }
 
+  /**
+   * Write what a failed reading means to /data, whatever the generation (a
+   * refusal or a 429 answered while Gladys disconnected, or while a new
+   * configuration started, is never lost). Uses the context captured when
+   * the request was sent (server key, HMAC, step). Returns the plan:
+   * { kind: 'refused' | 'stepWait' | 'pause' | 'retry', step?, delay? }.
+   */
+  async persistFailure(err) {
+    const ctx = err?.context ?? {
+      baseKey: this.baseKey,
+      key: null,
+      step: this.refusalStep,
+      pollMs: this.pollMs(),
+    };
+    if (!ctx.baseKey || !this.config.server) return { kind: 'retry' };
+    const key = ctx.key ?? (await this.refusalKey(this.config));
+    const stored = this.storedRefusal(ctx.baseKey);
+    const forced = stored?.key === key ? stored.forced : false;
+    const now = this.now();
+    if (isRefused(err)) {
+      // 1 h, 6 h, then 24 h for every refusal after: never a loop.
+      const step = ctx.step + 1;
+      const delay = this.stepDelay(step);
+      await this.writeRefusal(ctx.baseKey, { key, step, until: now + delay, forced });
+      return { kind: 'refused', step, delay };
+    }
+    let pause = null;
+    if (err?.status === 429) {
+      // Too many requests: a bounded pause of every path.
+      pause = clamp(
+        err.retryAfterMs ?? INTERVALS.BUSY_MIN_MS,
+        Math.max(INTERVALS.BUSY_MIN_MS, ctx.pollMs),
+        INTERVALS.BUSY_MAX_MS,
+      );
+    } else if (err?.status >= 500) {
+      pause = clamp(err.retryAfterMs ?? this.retryDelay, this.retryDelay, INTERVALS.BUSY_MAX_MS);
+    }
+    if (pause !== null) {
+      await this.store.set('meta', `pausedUntil|${ctx.baseKey}`, String(now + pause));
+    }
+    if (ctx.step > 0) {
+      // Within a series of refusals, no failure (a timeout...) is ever
+      // retried before the end of the current step.
+      const delay = Math.max(this.stepDelay(ctx.step), pause ?? 0);
+      await this.writeRefusal(ctx.baseKey, {
+        key,
+        step: ctx.step,
+        until: now + delay,
+        forced,
+      });
+      return { kind: 'stepWait', step: ctx.step, delay };
+    }
+    return pause !== null ? { kind: 'pause', delay: pause } : { kind: 'retry' };
+  }
+
   /** A reading failed: a long stop on a refusal, a pause, or a retry with a growing delay. */
   async failed(err, generation) {
+    const plan = await this.persistFailure(err);
     if (generation !== this.generation) return;
     const wasOnline = this.online;
     this.online = false;
     this.halt();
     await this.publishTransports();
-    if (isRefused(err)) {
-      // 1 h, 6 h, then 24 h for every refusal after: never a loop.
-      const steps = INTERVALS.REFUSAL_STEPS_MS;
-      this.refusalStep += 1;
-      const delay = steps[Math.min(this.refusalStep, steps.length) - 1];
-      const until = this.now() + delay;
+    if (plan.kind === 'refused' || plan.kind === 'stepWait') {
+      this.refusalStep = plan.step;
       this.blocked = true;
-      await this.store.set(
-        'refusals',
-        this.baseKey,
-        `${await this.refusalKey(this.config)}|${this.refusalStep}|${until}`,
-      );
-      this.logger.warn(
-        `Token refused by Nextcloud (HTTP ${err.status}, refusal ${this.refusalStep} in a row): next attempt in ${Math.round(delay / 60_000)} min`,
-      );
-      if (generation !== this.generation) return;
-      await this.setStatus(false, T.status.refused(err.status, delay));
-      this.schedule(delay, () => this.retryAfterRefusal(generation));
+      if (plan.kind === 'refused') {
+        this.logger.warn(
+          `Token refused by Nextcloud (HTTP ${err.status}, refusal ${plan.step} in a row): next attempt in ${Math.round(plan.delay / MINUTE)} min`,
+        );
+      } else {
+        this.logger.warn(`PhoneTrack fails after a refusal: ${this.describe(err)}`);
+      }
+      const message =
+        plan.kind === 'refused'
+          ? T.status.refused(err.status, plan.delay)
+          : this.errorMessage(err, plan.delay);
+      await this.setStatus(false, message);
+      this.schedule(plan.delay, () => this.retryAfterRefusal(generation));
       return;
     }
     let delay = this.retryDelay;
-    let pause = false;
-    if (err.status === 429) {
-      // Too many requests: a bounded pause of every path.
-      delay = clamp(
-        err.retryAfterMs ?? INTERVALS.BUSY_MIN_MS,
-        Math.max(INTERVALS.BUSY_MIN_MS, this.pollMs()),
-        INTERVALS.BUSY_MAX_MS,
-      );
-      pause = true;
-    } else {
-      if (err.status >= 500) {
-        delay = clamp(err.retryAfterMs ?? delay, delay, INTERVALS.BUSY_MAX_MS);
-        pause = true;
-      }
-      this.retryDelay = Math.min(this.retryDelay * 2, INTERVALS.RETRY_MAX_MS);
-    }
+    const pause = plan.kind === 'pause';
     if (pause) {
+      delay = plan.delay;
       this.pausedUntil = this.now() + delay;
-      await this.store.set('meta', this.pauseKey(), String(this.pausedUntil));
     }
-    if (wasOnline || delay === this.minRetry() || pause) {
-      // err.message never holds the URL (src/phonetrack/http.js).
-      this.logger.warn(`PhoneTrack fails: ${err.message}`);
+    if (err?.status !== 429)
+      this.retryDelay = Math.min(this.retryDelay * 2, INTERVALS.RETRY_MAX_MS);
+    if (!(err instanceof PhonetrackError)) {
+      this.logger.error(`Internal error of the integration: ${this.describe(err)}`);
+    } else if (wasOnline || delay === this.minRetry() || pause) {
+      this.logger.warn(`PhoneTrack fails: ${this.describe(err)}`);
     }
     const message = this.errorMessage(err, delay);
     this.retryWait = {
@@ -449,7 +589,15 @@ export class PhonetrackApp {
     this.schedule(delay, () => this.connect(generation));
   }
 
+  /** A failure in a few words for the logs: never a URL (src/phonetrack/http.js). */
+  describe(err) {
+    return `${err?.name ?? 'Error'}: ${err?.message ?? String(err)}`;
+  }
+
   errorMessage(err, delay) {
+    // A fault of the integration itself is never shown as a fault of Nextcloud.
+    if (!(err instanceof PhonetrackError)) return T.status.internal(delay);
+    if (err.code === CODES.TOO_LARGE) return T.status.tooLarge(delay);
     if (err.code === CODES.TLS_UNTRUSTED) return T.status.tlsUntrusted(delay);
     if (err.code === CODES.TLS_CHANGED) return T.status.tlsChanged(delay);
     if (err.status === 429) return T.status.busy(delay);
@@ -488,48 +636,100 @@ export class PhonetrackApp {
   async read({ publish }) {
     const client = this.client;
     if (!client) return;
-    const all = await client.lastPositions();
-    if (client !== this.client) return;
-    // The share works: forget a refusal and a pause asked earlier.
-    const base = this.baseKey;
-    if (this.store.get('refusals', base)) await this.store.set('refusals', base, null);
-    if (this.store.get('meta', this.pauseKey())) {
-      await this.store.set('meta', this.pauseKey(), null);
+    // The context of this request, kept with its failure: what is written to
+    // /data never depends on what the app became in between.
+    const context = {
+      baseKey: this.baseKey,
+      key: await this.refusalKey(this.config),
+      step: this.refusalStep,
+      pollMs: this.pollMs(),
+    };
+    if (context.step > 0) {
+      // An attempt after a refusal: if the app stops before the answer, the
+      // next start counts it as a refusal.
+      const stored = this.storedRefusal(context.baseKey);
+      await this.writeRefusal(context.baseKey, {
+        key: context.key,
+        step: context.step,
+        until: stored?.key === context.key ? stored.until : this.now(),
+        pending: true,
+        forced: stored?.key === context.key ? stored.forced : false,
+      });
     }
+    let all;
+    try {
+      all = await client.lastPositions();
+    } catch (err) {
+      if (err && typeof err === 'object') err.context = context;
+      throw err;
+    }
+    // The share works: forget a refusal and a pause asked earlier (even if
+    // the app moved on meanwhile: the answer is true for these values).
+    if (this.storedRefusal(context.baseKey)?.key === context.key) {
+      await this.writeRefusal(context.baseKey, null);
+    }
+    if (this.store.get('meta', `pausedUntil|${context.baseKey}`)) {
+      await this.store.set('meta', `pausedUntil|${context.baseKey}`, null);
+    }
+    if (client !== this.client) return;
     this.refusalStep = 0;
     this.pausedUntil = 0;
 
     const token = this.config.token;
-    const followed = all.slice(0, LIMITS.DEVICES).map((device) => {
-      const key = deviceKey(token, device.name);
-      if (device.satellites !== null) this.satellites.add(key);
-      return { ...device, key, hasSatellites: this.satellites.has(key) };
-    });
+    const createdKeys = new Set(createdDevices(this.gladys).map((c) => c.key));
+    const withKeys = all.map((device) => ({ ...device, key: deviceKey(token, device.name) }));
+    // The cap keeps the devices created in Gladys first, then the others by name.
+    const followed = [
+      ...withKeys.filter((d) => createdKeys.has(d.key)),
+      ...withKeys.filter((d) => !createdKeys.has(d.key)),
+    ]
+      .slice(0, LIMITS.DEVICES)
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .map((device) => {
+        if (device.satellites !== null) this.satellites.add(device.key);
+        return { ...device, hasSatellites: this.satellites.has(device.key) };
+      });
     const now = this.now();
-    const silentMs = this.config.silentMinutes * 60_000;
-    const events = [];
+    // A jump of the wall clock between two readings (NTP after a start with
+    // a wrong clock): this reading is a new baseline, no event.
+    const mono = this.monotonic();
+    const jumped =
+      this.lastClock !== null &&
+      Math.abs(now - this.lastClock.wall - (mono - this.lastClock.mono)) > CLOCK_JUMP_MS;
+    if (jumped) this.logger.info('The clock jumped: no silence event at this reading');
+    this.lastClock = { wall: now, mono };
+    const silentMs = this.config.silentMinutes * MINUTE;
+    /** [device, minutes, reached]: thresholds to fire (marked reached once sent). */
+    const candidates = [];
     let silentCount = 0;
     for (const device of followed) {
-      const age = device.timestampMs === null ? null : Math.max(0, now - device.timestampMs);
-      device.age = age;
-      device.silent = age === null ? null : age >= silentMs;
-      if (device.silent) silentCount += 1;
-      if (age === null) continue;
-      // A device seen for the first time: what is already reached is never
-      // fired (no event at the first reading, nor for a new device).
-      const first = !this.silence.has(device.key);
-      const reached = this.silence.get(device.key) ?? new Set();
-      this.silence.set(device.key, reached);
-      for (const minutes of THRESHOLDS) {
-        if (age >= minutes * 60_000) {
-          if (!reached.has(minutes)) {
-            reached.add(minutes);
-            if (!first) events.push([device, minutes]);
-          }
-        } else {
-          // A newer point: the silence of this threshold is over.
-          reached.delete(minutes);
+      try {
+        const age = device.timestampMs === null ? null : Math.max(0, now - device.timestampMs);
+        device.age = age;
+        device.silent = age === null ? null : age >= silentMs;
+        if (device.silent) silentCount += 1;
+        if (age === null) continue;
+        // A point far in the future (the clock of Gladys late at start): no
+        // baseline from it.
+        if (device.timestampMs - now > FUTURE_MS) continue;
+        // A device seen for the first time: what is already reached is never
+        // fired (no event at the first reading, nor for a new device).
+        const first = jumped || !this.silence.has(device.key);
+        const reached = this.silence.get(device.key) ?? new Set();
+        this.silence.set(device.key, reached);
+        if (age < THRESHOLDS[0] * MINUTE) {
+          // A newer point: the silence is over.
+          reached.clear();
+          continue;
         }
+        for (const minutes of THRESHOLDS) {
+          if (age < minutes * MINUTE || reached.has(minutes)) continue;
+          // Only the devices created in Gladys fire; the others only record.
+          if (first || !createdKeys.has(device.key)) reached.add(minutes);
+          else candidates.push([device, minutes, reached]);
+        }
+      } catch (err) {
+        this.logger.debug(`A device was skipped: ${this.describe(err)}`);
       }
     }
     this.devices = new Map(followed.map((device) => [device.key, device]));
@@ -545,11 +745,15 @@ export class PhonetrackApp {
     this.discoveredKey = discoveredKey;
     await this.publishStates();
     await this.publishTransports();
-    for (const [device, minutes] of events.slice(0, LIMITS.EVENTS_PER_ROUND)) {
-      await this.fire(device, minutes);
+    // A threshold is marked reached only once its event left; beyond 30,
+    // the rest waits for the next reading.
+    for (const [device, minutes, reached] of candidates.slice(0, LIMITS.EVENTS_PER_ROUND)) {
+      if (await this.fire(device, minutes)) reached.add(minutes);
     }
-    if (events.length > LIMITS.EVENTS_PER_ROUND) {
-      this.logger.warn(`${events.length - LIMITS.EVENTS_PER_ROUND} silence event(s) not sent`);
+    if (candidates.length > LIMITS.EVENTS_PER_ROUND) {
+      this.logger.info(
+        `${candidates.length - LIMITS.EVENTS_PER_ROUND} silence event(s) left for the next reading`,
+      );
     }
     await this.setStatus(true, this.okMessage());
   }
@@ -564,18 +768,23 @@ export class PhonetrackApp {
     });
   }
 
+  /** Resolves true when the event left, false otherwise (never throws). */
   async fire(device, minutes) {
-    await this.gladys
+    return this.gladys
       .publishSceneEvent(SCENE_TRIGGERS.DEVICE_SILENT, {
         device: deviceIds(this.gladys, device.key).device,
         minutes: String(minutes),
         device_name: device.name.slice(0, LIMITS.NAME_LENGTH),
-        silent_for: Math.floor(device.age / 60_000),
+        silent_for: Math.floor(device.age / MINUTE),
         last_seen: formatDate(device.timestampMs) ?? '',
       })
-      .catch((err) => {
-        this.logger.warn(`Scene event not sent: ${err.message}`);
-      });
+      .then(
+        () => true,
+        (err) => {
+          this.logger.warn(`Scene event not sent: ${err.message}`);
+          return false;
+        },
+      );
   }
 
   /** Never throws: a refusal of Gladys is not a PhoneTrack failure. */
@@ -599,8 +808,12 @@ export class PhonetrackApp {
       const done = await this.refresh({ publish: true }).then(
         () => true,
         async (err) => {
-          if (generation !== this.generation) return true;
-          // Any failure takes the usual path (refusal, pause, retry).
+          // Any failure takes the usual path (refusal, pause, retry); an
+          // older generation only keeps what Nextcloud answered.
+          if (generation !== this.generation) {
+            await this.persistFailure(err);
+            return true;
+          }
           await this.failed(err, generation);
           return false;
         },

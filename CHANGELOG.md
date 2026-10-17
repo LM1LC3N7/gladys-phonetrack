@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-17
+
 ### Added
 
 - First version, never tested with a real Nextcloud: the devices of one
@@ -50,3 +52,6 @@ the notes of the version's GitHub Release.
 - A reconnection or a saved configuration during the attempt that follows a
   stop waits for its outcome (45 s at most): a success is no longer counted
   as a refusal, and never two requests run at once.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-phonetrack/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-phonetrack/releases/tag/v0.1.1

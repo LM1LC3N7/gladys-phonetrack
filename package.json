@@ -1,6 +1,6 @@
 {
   "name": "gladys-phonetrack",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for PhoneTrack (Nextcloud app): the last position, battery and silence of each device of a public PhoneTrack session, read only, through its read-only API link. Unofficial, not affiliated with PhoneTrack nor Nextcloud.",
   "type": "module",

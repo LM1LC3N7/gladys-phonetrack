@@ -46,6 +46,9 @@ export function createFakePhonetrack() {
     /** { status, headers, body } answered once each (FIFO). */
     failures: [],
     unreachable: false,
+    /** Requests waiting for their answer, and the most at once. */
+    inFlight: 0,
+    maxInFlight: 0,
     /** A promise the API waits for before answering (a slow reading). */
     gate: null,
   };
@@ -80,9 +83,15 @@ export function createFakePhonetrack() {
       Object.entries(options.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
     );
     fake.requests.push({ url: rawUrl, path: url.pathname, headers, options });
-    if (fake.gate) await fake.gate;
-    if (fake.unreachable) throw new PhonetrackError(CODES.UNREACHABLE, 'ECONNREFUSED');
-    return answer(url);
+    fake.inFlight += 1;
+    fake.maxInFlight = Math.max(fake.maxInFlight, fake.inFlight);
+    try {
+      if (fake.gate) await fake.gate;
+      if (fake.unreachable) throw new PhonetrackError(CODES.UNREACHABLE, 'ECONNREFUSED');
+      return answer(url);
+    } finally {
+      fake.inFlight -= 1;
+    }
   };
 
   /** The same API on a loopback server (https when `tls` gives key and cert): { url, port, close }. */

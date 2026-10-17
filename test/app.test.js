@@ -510,6 +510,55 @@ test('an attempt after a refusal still in flight at a restart counts as a refusa
   await attempt;
 });
 
+/** Wait (real time) until the fake has received `count` requests. */
+async function untilRequests(phonetrack, count) {
+  for (let i = 0; i < 400 && phonetrack.requests.length < count; i += 1) await tick();
+  assert.equal(phonetrack.requests.length, count);
+}
+
+test('a reconnection during the attempt after a stop waits for it: a success stays a success', async () => {
+  const { gladys, phonetrack, timers, clock, app } = await setup({ config: { token: WRONG } });
+  // The share works again (the right token), the attempt after the stop leaves.
+  await gladys.fake.configUpdated({ ...BASE_CONFIG });
+  phonetrack.failures.push(NOT_FOUND);
+  clock.now += MIN;
+  await poll(timers);
+  assert.deepEqual(timers.delays(), [HOUR]);
+  clock.now += HOUR;
+  const release = hold(phonetrack);
+  const attempt = timers.run();
+  await untilRequests(phonetrack, 4);
+  // Gladys reconnects while the attempt is in flight; then it succeeds.
+  gladys.emit('connected');
+  await tick();
+  assert.equal(phonetrack.inFlight, 1, 'the reconnection waits: no second request');
+  release();
+  await attempt;
+  for (let i = 0; i < 5; i += 1) await tick();
+  await app.queue;
+  assert.equal(gladys.fake.connectionStatus.connected, true);
+  assert.deepEqual(timers.delays(), [60_000], 'no 6 h wait');
+  assert.equal(phonetrack.maxInFlight, 1);
+});
+
+test('saving during the attempt after a stop: one request at a time', async () => {
+  const { gladys, phonetrack, timers, clock, app } = await setup({ config: { token: WRONG } });
+  clock.now = T0 + HOUR;
+  const release = hold(phonetrack);
+  const attempt = timers.run();
+  await untilRequests(phonetrack, 2);
+  const saving = gladys.fake.configUpdated({ ...BASE_CONFIG, token: WRONG });
+  await tick();
+  assert.equal(phonetrack.requests.length, 2, 'the forced attempt waits');
+  release();
+  await attempt;
+  await saving;
+  await app.queue;
+  assert.equal(phonetrack.maxInFlight, 1);
+  assert.equal(phonetrack.requests.length, 3, 'then the one forced attempt');
+  assert.match(gladys.fake.connectionStatus.message.en, /refused the token/);
+});
+
 test('saving the same refused token: one forced attempt per series of refusals', async () => {
   const { gladys, phonetrack } = await setup({ config: { token: WRONG } });
   assert.equal(phonetrack.requests.length, 1);

@@ -47,3 +47,6 @@ the notes of the version's GitHub Release.
 - A 403 names a firewall or a proxy as a possible cause; timeout 45 s; the
   configuration not given by Gladys at a reconnection falls back on the last
   one, or is read again every minute.
+- A reconnection or a saved configuration during the attempt that follows a
+  stop waits for its outcome (45 s at most): a success is no longer counted
+  as a refusal, and never two requests run at once.

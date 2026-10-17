@@ -237,6 +237,11 @@ u: end, p: pending, f: forced }` under a salted digest of the address.
     skipped for an older generation. A success likewise clears them.
   - **Pending attempt**: before an attempt within a series of refusals,
     `p: true` is written; a start that finds it counts one more refusal.
+    The outcome of a reading is written to /data inside read() before its
+    error goes up, and run() first waits for a reading of this process
+    still in flight (45 s at most): `pending` only counts for a process
+    that really died, and a save during the attempt never sends the forced
+    attempt in parallel (approval notes N1, N2).
   - **Within a series of refusals** any other failure (timeout, network,
     429 / 5xx) waits for the end of the current step again (max with the
     pause): never a faster retry (review point 11).

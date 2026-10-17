@@ -34,6 +34,7 @@ import {
   SCENE_TRIGGERS,
   SILENT_MINUTES,
   STORE_FILE,
+  TIMEOUTS,
 } from './constants.js';
 import { buildDevice, createdDevices, deviceIds, deviceKey, sessionKey } from './devices.js';
 import { T } from './i18n.js';
@@ -43,7 +44,7 @@ import { CODES, PhonetrackError, isRefused } from './phonetrack/errors.js';
 import { httpRequest } from './phonetrack/http.js';
 import { formatDate } from './phonetrack/parse.js';
 
-/** The "Test the connection" button waits 60 s: answer before. */
+/** The "Test the connection" button waits 60 s: answer within 55 s. */
 const TEST_BUDGET_MS = 55_000;
 /** A point this far in the future (clock of Gladys late) is not a baseline. */
 const FUTURE_MS = 5 * 60_000;
@@ -233,6 +234,18 @@ export class PhonetrackApp {
     await this.store.set('refusals', baseKey, value);
   }
 
+  /** Wait for the reading in flight, if any, at most the request timeout. */
+  async settleReading() {
+    const reading = this.reading;
+    if (!reading) return;
+    let handle;
+    const limit = new Promise((resolve) => {
+      handle = this.timers.setTimeout(resolve, TIMEOUTS.API);
+    });
+    await Promise.race([reading.catch(() => {}), limit]);
+    this.timers.clearTimeout(handle);
+  }
+
   /** The stop after the n-th refusal in a row: 1 h, 6 h, then 24 h. */
   stepDelay(step) {
     const steps = INTERVALS.REFUSAL_STEPS_MS;
@@ -277,6 +290,12 @@ export class PhonetrackApp {
     // reconnection to Gladys included) always sends them again.
     this.lastStatus = null;
     await this.store.load();
+    // A reading of this process still in flight (a reconnection or a saved
+    // configuration during the attempt that follows a stop): wait for its
+    // outcome, written to /data by read(), before looking at the refusal
+    // kept there. `pending` then only counts for a process that really died,
+    // and never two requests run at once.
+    await this.settleReading();
 
     if (config.tokenUnsupported) {
       await this.stopWith(T.status.tokenUnsupported);
@@ -491,6 +510,8 @@ export class PhonetrackApp {
    * { kind: 'refused' | 'stepWait' | 'pause' | 'retry', step?, delay? }.
    */
   async persistFailure(err) {
+    // Already written by read() when the answer arrived: never twice.
+    if (err?.plan) return err.plan;
     const ctx = err?.context ?? {
       baseKey: this.baseKey,
       key: null,
@@ -660,7 +681,12 @@ export class PhonetrackApp {
     try {
       all = await client.lastPositions();
     } catch (err) {
-      if (err && typeof err === 'object') err.context = context;
+      if (err && typeof err === 'object') {
+        err.context = context;
+        // The outcome is in /data before anyone (a restart waiting for this
+        // reading) looks at it; failed() reuses this plan.
+        err.plan = await this.persistFailure(err);
+      }
       throw err;
     }
     // The share works: forget a refusal and a pause asked earlier (even if
@@ -986,7 +1012,7 @@ export class PhonetrackApp {
   }
 
   /**
-   * Reconnects, then reports, within 50 s. Never shortens the stop after a
+   * Reconnects, then reports, within 55 s. Never shortens the stop after a
    * refusal (only saving the configuration does) nor a pause.
    */
   async testConnection() {

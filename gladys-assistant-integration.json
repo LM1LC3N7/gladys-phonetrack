@@ -1,177 +1,185 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "name": "Demo Devices Template",
+  "name": "PhoneTrack",
   "description": {
-    "en": "Starter template showing sensors, a switch, a dimmable light and a smart plug.",
-    "fr": "Template de démarrage : capteurs, interrupteur, lampe variable et prise connectée."
+    "en": "Position, battery and silence of your PhoneTrack devices (Nextcloud), read-only share.",
+    "fr": "Position, batterie et silence de vos appareils PhoneTrack (Nextcloud), partage en lecture."
   },
-  "version": "1.0.0",
-  "docker_image": "ghcr.io/gladysassistant/integration-template-js:1.0.0",
+  "version": "0.1.0",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-phonetrack:0.1.0",
   "gladys_version": ">=5.1.0",
-  "cover_image": "https://raw.githubusercontent.com/GladysAssistant/integration-template-js/master/cover.png",
-  "categories": ["lighting", "security", "environment"],
-  "transports": ["local", "cloud"],
+  "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-phonetrack/main/cover.png",
+  "categories": ["services"],
+  "transports": ["cloud"],
   "config_schema": [
     {
       "key": "intro",
       "type": "section",
-      "label": { "en": "Getting started", "fr": "Pour commencer" },
+      "label": { "en": "How it works", "fr": "Fonctionnement" },
       "description": {
-        "en": "The demo weather station reads real data from the free Open-Meteo API: pick the coordinates to observe. No account, no API key.",
-        "fr": "La station météo de démonstration lit de vraies données via l'API gratuite Open-Meteo : choisissez les coordonnées à observer. Pas de compte, pas de clé d'API."
+        "en": "Gladys reads the last position of each device of one PhoneTrack session (the location app of Nextcloud), through the public, read-only link of the session: nothing to open on your network, it works behind a NAT. Each PhoneTrack device becomes a Gladys device (Discovery tab): latitude, longitude, battery, accuracy, speed, altitude, bearing, satellites, last seen and silent. Read only: Gladys never changes anything in PhoneTrack. Gladys does not move the position of a Gladys user on its map yet (see the documentation). Unofficial integration, not affiliated with PhoneTrack nor Nextcloud.",
+        "fr": "Gladys lit la dernière position de chaque appareil d'une session PhoneTrack (l'application de localisation de Nextcloud), par le lien public en lecture seule de la session : rien à ouvrir sur votre réseau, cela marche derrière un NAT. Chaque appareil PhoneTrack devient un appareil Gladys (onglet Découverte) : latitude, longitude, batterie, précision, vitesse, altitude, cap, satellites, vu pour la dernière fois et muet. Lecture seule : Gladys ne change jamais rien dans PhoneTrack. Gladys ne déplace pas encore la position d'un utilisateur Gladys sur sa carte (voir la documentation). Intégration non officielle, sans lien avec PhoneTrack ni Nextcloud."
       },
       "links": [
         {
-          "url": "https://open-meteo.com/en/docs",
-          "label": { "en": "Open-Meteo documentation", "fr": "Documentation Open-Meteo" }
+          "url": "https://github.com/julien-nc/phonetrack/blob/main/doc/user.md#sharing",
+          "label": { "en": "PhoneTrack sharing", "fr": "Partage PhoneTrack" }
         }
       ]
     },
     {
-      "key": "latitude",
-      "type": "number",
-      "label": { "en": "Latitude", "fr": "Latitude" },
+      "key": "url",
+      "type": "string",
+      "label": { "en": "Nextcloud address", "fr": "Adresse de Nextcloud" },
       "description": {
-        "en": "Latitude used for the demo weather sensor.",
-        "fr": "Latitude utilisée par le capteur météo de démonstration."
+        "en": "The https address of your Nextcloud (e.g. https://cloud.example.org, with its folder if it has one). May stay empty when the full API link is pasted below. http:// is refused: the token, part of the address, would cross the network in clear.",
+        "fr": "L'adresse https de votre Nextcloud (ex. https://cloud.example.org, avec son dossier s'il en a un). Peut rester vide si le lien API complet est collé ci-dessous. http:// est refusé : le jeton, qui fait partie de l'adresse, traverserait le réseau en clair."
       },
-      "placeholder": { "en": "e.g. 48.8566", "fr": "ex. 48.8566" },
-      "required": true,
-      "default": 48.8566,
-      "min": -90,
-      "max": 90
+      "placeholder": {
+        "en": "e.g. https://cloud.example.org",
+        "fr": "ex. https://cloud.example.org"
+      },
+      "required": false
     },
     {
-      "key": "longitude",
-      "type": "number",
-      "label": { "en": "Longitude", "fr": "Longitude" },
+      "key": "token",
+      "type": "secret",
+      "label": { "en": "Public token or API link", "fr": "Jeton public ou lien API" },
       "description": {
-        "en": "Longitude used for the demo weather sensor.",
-        "fr": "Longitude utilisée par le capteur météo de démonstration."
+        "en": "In PhoneTrack: the session, Sharing, turn public sharing on, then copy the API link (last positions), or only its token. Kept by Gladys in its database, never shown again, never logged, sent only to your Nextcloud.",
+        "fr": "Dans PhoneTrack : la session, Partage, activez le partage public, puis copiez le lien API (dernières positions), ou son seul jeton. Gardé par Gladys dans sa base, jamais réaffiché, jamais journalisé, envoyé seulement à votre Nextcloud."
       },
-      "placeholder": { "en": "e.g. 2.3522", "fr": "ex. 2.3522" },
-      "required": true,
-      "default": 2.3522,
-      "min": -180,
-      "max": 180
+      "placeholder": {
+        "en": "https://cloud.example.org/apps/phonetrack/api/getlastpositions/...",
+        "fr": "https://cloud.example.org/apps/phonetrack/api/getlastpositions/..."
+      },
+      "required": true
     },
     {
-      "key": "unit",
+      "key": "tls_section",
+      "type": "section",
+      "label": { "en": "Certificate", "fr": "Certificat" },
+      "description": {
+        "en": "By default the certificate of Nextcloud must come from a known authority (Let's Encrypt...). A Nextcloud with its own certificate: type its SHA-256 fingerprint below. That certificate, and no other, is then accepted, checked before the token is sent.",
+        "fr": "Par défaut le certificat de Nextcloud doit venir d'une autorité reconnue (Let's Encrypt...). Un Nextcloud avec son propre certificat : saisissez son empreinte SHA-256 ci-dessous. Ce certificat, et aucun autre, est alors accepté, vérifié avant l'envoi du jeton."
+      }
+    },
+    {
+      "key": "certificate_fingerprint",
+      "type": "string",
+      "label": {
+        "en": "Certificate fingerprint (SHA-256, optional)",
+        "fr": "Empreinte du certificat (SHA-256, facultatif)"
+      },
+      "description": {
+        "en": "Pins this certificate: the server must present exactly it, even after a renewal (type the new one then). Shown by your browser (certificate details) or by openssl (see the documentation).",
+        "fr": "Épingle ce certificat : le serveur doit présenter exactement celui-ci, même après un renouvellement (saisissez alors le nouveau). Affichée par votre navigateur (détails du certificat) ou par openssl (voir la documentation)."
+      },
+      "placeholder": { "en": "e.g. AB:12:...:EF", "fr": "ex. AB:12:...:EF" },
+      "required": false
+    },
+    {
+      "key": "poll_interval",
       "type": "select",
-      "label": { "en": "Temperature unit", "fr": "Unité de température" },
-      "required": false,
-      "default": "celsius",
+      "label": { "en": "Refresh", "fr": "Rafraîchissement" },
+      "description": {
+        "en": "How often Gladys reads the last positions (one request each time). PhoneTrack only knows what the phones sent: their own logging interval matters as much.",
+        "fr": "Fréquence de lecture des dernières positions (une requête à chaque fois). PhoneTrack ne sait que ce que les téléphones ont envoyé : leur propre intervalle d'envoi compte autant."
+      },
+      "required": true,
+      "default": "60",
       "options": [
-        { "value": "celsius", "label": { "en": "Celsius", "fr": "Celsius" } },
-        { "value": "fahrenheit", "label": { "en": "Fahrenheit", "fr": "Fahrenheit" } }
+        { "value": "30", "label": { "en": "Every 30 seconds", "fr": "Toutes les 30 secondes" } },
+        { "value": "60", "label": { "en": "Every minute", "fr": "Toutes les minutes" } },
+        { "value": "120", "label": { "en": "Every 2 minutes", "fr": "Toutes les 2 minutes" } },
+        { "value": "300", "label": { "en": "Every 5 minutes", "fr": "Toutes les 5 minutes" } },
+        { "value": "600", "label": { "en": "Every 10 minutes", "fr": "Toutes les 10 minutes" } }
       ]
     },
     {
-      "key": "poll_frequency",
-      "type": "number",
-      "label": { "en": "Refresh interval (s)", "fr": "Intervalle de rafraîchissement (s)" },
+      "key": "silent_minutes",
+      "type": "select",
+      "label": { "en": "Silent after", "fr": "Muet après" },
       "description": {
-        "en": "How often sensors are polled, in seconds (one minute minimum).",
-        "fr": "Fréquence d'interrogation des capteurs, en secondes (une minute minimum)."
+        "en": "A device that sent no new position for this long is shown silent (feature Silent). The scene trigger has its own choice.",
+        "fr": "Un appareil qui n'a envoyé aucune nouvelle position depuis ce délai est indiqué muet (fonction Muet). Le déclencheur de scène a son propre choix."
       },
-      "required": false,
-      "default": 300,
-      "min": 60,
-      "max": 3600
+      "required": true,
+      "default": "60",
+      "options": [
+        { "value": "15", "label": { "en": "15 minutes", "fr": "15 minutes" } },
+        { "value": "30", "label": { "en": "30 minutes", "fr": "30 minutes" } },
+        { "value": "60", "label": { "en": "1 hour", "fr": "1 heure" } },
+        { "value": "120", "label": { "en": "2 hours", "fr": "2 heures" } },
+        { "value": "240", "label": { "en": "4 hours", "fr": "4 heures" } },
+        { "value": "480", "label": { "en": "8 hours", "fr": "8 heures" } },
+        { "value": "720", "label": { "en": "12 hours", "fr": "12 heures" } },
+        { "value": "1440", "label": { "en": "24 hours", "fr": "24 heures" } }
+      ]
     }
   ],
   "actions": [
     {
-      "key": "test_weather",
-      "label": { "en": "Test the weather provider", "fr": "Tester le fournisseur météo" },
-      "timeout_seconds": 30
-    },
-    {
-      "key": "identify",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ]
+      "key": "test_connection",
+      "label": { "en": "Test the connection", "fr": "Tester la connexion" },
+      "description": {
+        "en": "Reads the last positions again and says how many devices answer. After a refusal of the token, only saving the configuration tries again before the end of the stop.",
+        "fr": "Relit les dernières positions et indique combien d'appareils répondent. Après un refus du jeton, seul l'enregistrement de la configuration réessaie avant la fin de l'arrêt."
+      },
+      "timeout_seconds": 60
     }
   ],
   "scene_triggers": [
     {
-      "key": "motion_detected",
-      "label": { "en": "Motion detected", "fr": "Mouvement détecté" },
+      "key": "device_silent",
+      "label": { "en": "Device silent", "fr": "Appareil muet" },
       "description": {
-        "en": "A demo motion sensor saw a person or an animal move.",
-        "fr": "Un détecteur de démonstration a vu bouger une personne ou un animal."
+        "en": "A PhoneTrack device sent no new position for the chosen time. Once per silence: again only after a new position. Never for a device already silent when Gladys starts. Read at the chosen refresh.",
+        "fr": "Un appareil PhoneTrack n'a envoyé aucune nouvelle position depuis le délai choisi. Une fois par silence : de nouveau seulement après une nouvelle position. Jamais pour un appareil déjà muet au démarrage de Gladys. Lu au rythme du rafraîchissement."
       },
       "fields": [
         {
           "key": "device",
           "type": "select",
           "source": "devices",
-          "label": { "en": "Sensor", "fr": "Détecteur" }
+          "required": false,
+          "label": { "en": "Device (empty: any)", "fr": "Appareil (vide : tous)" }
         },
         {
-          "key": "target",
-          "type": "multi_select",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" },
+          "key": "minutes",
+          "type": "select",
+          "required": true,
+          "label": { "en": "Silent for", "fr": "Muet depuis" },
           "options": [
-            { "value": "person", "label": { "en": "Person", "fr": "Personne" } },
-            { "value": "animal", "label": { "en": "Animal", "fr": "Animal" } }
+            { "value": "15", "label": { "en": "15 minutes", "fr": "15 minutes" } },
+            { "value": "30", "label": { "en": "30 minutes", "fr": "30 minutes" } },
+            { "value": "60", "label": { "en": "1 hour", "fr": "1 heure" } },
+            { "value": "120", "label": { "en": "2 hours", "fr": "2 heures" } },
+            { "value": "240", "label": { "en": "4 hours", "fr": "4 heures" } },
+            { "value": "480", "label": { "en": "8 hours", "fr": "8 heures" } },
+            { "value": "720", "label": { "en": "12 hours", "fr": "12 heures" } },
+            { "value": "1440", "label": { "en": "24 hours", "fr": "24 heures" } }
           ]
         }
       ],
       "variables": [
         {
-          "key": "target",
+          "key": "device_name",
           "type": "string",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" }
+          "label": { "en": "Device name", "fr": "Nom de l'appareil" }
+        },
+        {
+          "key": "silent_for",
+          "type": "number",
+          "label": { "en": "Silent for (minutes)", "fr": "Muet depuis (minutes)" }
+        },
+        {
+          "key": "last_seen",
+          "type": "string",
+          "label": { "en": "Last seen (UTC)", "fr": "Vu pour la dernière fois (UTC)" }
         }
       ]
-    }
-  ],
-  "scene_actions": [
-    {
-      "key": "identify_device",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
-      "description": {
-        "en": "Make a device signal itself (the demo light blinks).",
-        "fr": "Fait se signaler un appareil (la lampe de démonstration clignote)."
-      },
-      "timeout_seconds": 15,
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ],
-      "outputs": [
-        {
-          "key": "signalled",
-          "type": "boolean",
-          "label": { "en": "Device signalled", "fr": "Appareil signalé" }
-        }
-      ]
-    }
-  ],
-  "widgets": [
-    {
-      "key": "demo_status",
-      "label": { "en": "Demo status", "fr": "État de la démo" },
-      "description": {
-        "en": "Live temperature and plug power, plug connection and observed location.",
-        "fr": "Température et puissance en direct, connexion de la prise, position observée."
-      },
-      "icon": "activity",
-      "action_timeout_seconds": 15
     }
   ]
 }

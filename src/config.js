@@ -1,45 +1,122 @@
 // -----------------------------------------------------------------------------
-// Integration configuration.
-//
-// The configuration is filled in by the user in Gladys, from the `config_schema`
-// declared in `gladys-assistant-integration.json`. The SDK fetches it for you
-// (`gladys.getConfig()`) and notifies you of every change through
-// `gladys.onConfigUpdated()`.
-//
-// This module only provides defaults and normalizes the received object, so the
-// rest of the code never has to deal with `undefined`.
+// The configuration the user fills (manifest `config_schema`), normalized.
 // -----------------------------------------------------------------------------
 
-// Defaults: they MUST stay consistent with the `default` values declared in the
-// `config_schema` of the manifest.
-export const DEFAULT_CONFIG = {
-  latitude: 48.8566, // Paris
-  longitude: 2.3522,
-  unit: 'celsius', // 'celsius' | 'fahrenheit'
-  // Seconds between two reads of the polled sensors. Gladys polls at most once
-  // a minute: slower intervals are applied by skipping polls (see
-  // createPoller in src/devices/index.js).
-  poll_frequency: 300,
-  // Reserved key (NOT in config_schema): because the manifest declares both
-  // 'local' and 'cloud' in its `transports` field, Gladys shows a standard
-  // "Prefer the local connection" toggle and sends the user's choice here.
-  // Read-only for the integration; defaults to true.
-  GLADYS_PREFER_LOCAL: true,
-};
+import { POLL_INTERVALS, SILENT_MINUTES } from './constants.js';
+import { normalizeFingerprint } from './phonetrack/http.js';
+
+// Defaults: they MUST match the `default` values of the manifest.
+export const DEFAULTS = Object.freeze({
+  poll_interval: '60',
+  silent_minutes: '60',
+});
+
+/** What PhoneTrack gives as a public token: letters, digits, `-` and `_`. */
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{6,128}$/;
+
+/** The links of PhoneTrack that carry the public token of a session. */
+const LINK_PATTERN =
+  /\/apps\/phonetrack\/(?:api\/getlastpositions|api\/getpositions|publicSessionWatch)\/([^/?#]+)/i;
+
+const text = (value) => (typeof value === 'string' ? value.trim() : '');
 
 /**
- * Merge the user config with the defaults.
- * @param {Record<string, unknown>} raw config returned by the SDK
+ * The Nextcloud server: `https://host[:port][/path]` (a bare `host[:port]` is
+ * read as https). What follows the Nextcloud address in a link of PhoneTrack
+ * (`/index.php`, `/apps/phonetrack/...`) is dropped. http:// is refused (the
+ * share token is part of the URL and would cross the network in clear), and
+ * so are credentials, a query and a fragment.
+ *   -> { base, hostname, port } or { error: 'missing' | 'invalid' | 'http' | 'credentials' | 'link' }
  */
+export function parseServerUrl(value) {
+  const raw = text(value);
+  if (!raw) return { error: 'missing' };
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);
+  const full = hasScheme ? raw : `https://${raw}`;
+  let url;
+  try {
+    url = new URL(full);
+  } catch {
+    return { error: 'invalid' };
+  }
+  // A link with the token typed in this field (shown in clear): refused.
+  if (LINK_PATTERN.test(url.pathname)) return { error: 'link' };
+  if (url.protocol === 'http:') return { error: 'http' };
+  if (url.protocol !== 'https:') return { error: 'invalid' };
+  if (url.username || url.password) return { error: 'credentials' };
+  if (url.search || url.hash || !url.hostname) return { error: 'invalid' };
+  const path = url.pathname
+    .replace(/\/apps\/phonetrack(\/.*)?$/i, '')
+    .replace(/\/+$/, '')
+    .replace(/\/index\.php$/i, '')
+    .replace(/\/+$/, '');
+  if (path && !/^(\/[A-Za-z0-9._~%-]+)+$/.test(path)) return { error: 'invalid' };
+  // `https://host:443` loses its port in URL (the default): read it from the text.
+  const typedPort = /^[a-z][a-z0-9+.-]*:\/\/(?:\[[^\]]*\]|[^/:?#]*):(\d+)/i.exec(full);
+  const port = typedPort ? Number(typedPort[1]) : 443;
+  if (!(port > 0 && port < 65536)) return { error: 'invalid' };
+  const hostname = url.hostname.toLowerCase();
+  const origin = port === 443 ? `https://${hostname}` : `https://${hostname}:${port}`;
+  return { base: `${origin}${path}`, hostname, port };
+}
+
+/**
+ * The token field: the public token of the session, or a link of PhoneTrack
+ * that carries it (the "API link" of the session's public sharing, or its
+ * public watch link). -> { token, linkServer } | { error: 'invalid' }; with a
+ * link, `linkServer` is the Nextcloud address it points to (parseServerUrl).
+ */
+export function parseToken(value) {
+  const raw = text(value);
+  if (!raw) return { token: '', linkServer: null };
+  if (!raw.includes('/')) return { token: raw, linkServer: null };
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw);
+  let url;
+  try {
+    url = new URL(hasScheme ? raw : `https://${raw}`);
+  } catch {
+    return { error: 'invalid' };
+  }
+  const match = LINK_PATTERN.exec(url.pathname);
+  if (!match) return { error: 'invalid' };
+  let token;
+  try {
+    token = decodeURIComponent(match[1]);
+  } catch {
+    return { error: 'invalid' };
+  }
+  // The address of the link, without the token part (never kept with it).
+  const at = url.pathname.toLowerCase().indexOf('/apps/phonetrack/');
+  const prefix = `${url.protocol}//${url.host}${url.pathname.slice(0, at)}`;
+  return { token, linkServer: parseServerUrl(prefix) };
+}
+
 export function normalizeConfig(raw = {}) {
+  raw = raw ?? {};
+  const pick = (key, list) => (list.includes(String(raw[key])) ? String(raw[key]) : DEFAULTS[key]);
+  const typedFingerprint = text(raw.certificate_fingerprint);
+  const fingerprint = typedFingerprint ? normalizeFingerprint(typedFingerprint) : null;
+  const parsedToken = parseToken(raw.token);
+  const token = parsedToken.error ? '' : parsedToken.token;
+  let server = parseServerUrl(raw.url);
+  let urlError = server.error ?? null;
+  const link = parsedToken.linkServer;
+  if (urlError === 'missing' && link) {
+    // Only the link was given: its address is the server.
+    server = link;
+    urlError = link.error ?? null;
+  } else if (!urlError && link && (link.error || link.base !== server.base)) {
+    // The link points elsewhere: the token is never sent to another server.
+    urlError = link.error === 'http' ? 'http' : 'mismatch';
+  }
   return {
-    ...DEFAULT_CONFIG,
-    ...raw,
-    // Force the types: config may arrive as strings from a form.
-    latitude: Number(raw.latitude ?? DEFAULT_CONFIG.latitude),
-    longitude: Number(raw.longitude ?? DEFAULT_CONFIG.longitude),
-    poll_frequency: Number(raw.poll_frequency ?? DEFAULT_CONFIG.poll_frequency),
-    // The preference is a boolean; anything but an explicit false means true.
-    GLADYS_PREFER_LOCAL: raw.GLADYS_PREFER_LOCAL !== false,
+    server: urlError ? null : server,
+    urlError,
+    token,
+    tokenInvalid: Boolean(parsedToken.error) || (token !== '' && !TOKEN_PATTERN.test(token)),
+    fingerprint,
+    fingerprintInvalid: typedFingerprint !== '' && fingerprint === null,
+    pollSeconds: Number(pick('poll_interval', POLL_INTERVALS)),
+    silentMinutes: Number(pick('silent_minutes', SILENT_MINUTES)),
   };
 }

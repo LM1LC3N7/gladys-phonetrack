@@ -6,8 +6,8 @@
     "en": "Position, battery and silence of your PhoneTrack devices (Nextcloud), read-only share.",
     "fr": "Position, batterie et silence de vos appareils PhoneTrack (Nextcloud), partage en lecture."
   },
-  "version": "0.1.1",
-  "docker_image": "ghcr.io/lm1lc3n7/gladys-phonetrack:0.1.1",
+  "version": "0.1.2",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-phonetrack:0.1.2",
   "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-phonetrack/main/cover.png",
   "categories": ["services"],
